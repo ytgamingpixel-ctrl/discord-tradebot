@@ -6,6 +6,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  StringSelectMenuBuilder,
 } = require('discord.js');
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
@@ -13,6 +14,17 @@ const MAX_DAYS = 35;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const STAR_CITIZEN_MATCH = /star\s*citizen/i;
 const THUMBNAIL_URL = 'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
+const TRACKED_ROLE_NAME = process.env.TRACKED_ROLE_NAME || 'SPACEWHLE';
+const TRACKED_ROLE_ID = process.env.TRACKED_ROLE_ID || null;
+
+const COLORS = {
+  brand: 0x5865f2,
+  panel: 0x0f172a,
+  messages: '#60a5fa',
+  voice: '#34d399',
+  starCitizen: '#f59e0b',
+  accent: '#a78bfa',
+};
 
 function safeReadJson(filePath, fallback) {
   try {
@@ -44,31 +56,6 @@ function formatDisplayDate(dayKey) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
-function rangeDaysFromCustomId(customId, fallback = 7) {
-  const parsed = Number(String(customId || '').split(':').pop());
-  return [1, 7, 14, 30].includes(parsed) ? parsed : fallback;
-}
-
-function createEmptyUser(userId, username = 'Unknown User') {
-  return {
-    userId,
-    username,
-    messages: {},
-    voiceSeconds: {},
-    starCitizenSeconds: {},
-    totals: {
-      messages: 0,
-      voiceSeconds: 0,
-      starCitizenSeconds: 0,
-    },
-    current: {
-      voiceStartedAt: null,
-      starCitizenStartedAt: null,
-      lastKnownStarCitizen: false,
-    },
-  };
-}
-
 function cleanupDailyMap(map) {
   const cutoff = new Date(now() - MAX_DAYS * ONE_DAY_MS).toISOString().slice(0, 10);
   for (const key of Object.keys(map || {})) {
@@ -76,11 +63,119 @@ function cleanupDailyMap(map) {
   }
 }
 
+function createDailyStatMap() {
+  return {};
+}
+
+function createEmptyUser(userId, username = 'Unknown User') {
+  return {
+    userId,
+    username,
+    messages: createDailyStatMap(),
+    voiceSeconds: createDailyStatMap(),
+    starCitizenSeconds: createDailyStatMap(),
+    totals: {
+      messages: 0,
+      voiceSeconds: 0,
+      starCitizenSeconds: 0,
+    },
+    current: {
+      voiceStartedAt: null,
+      voiceChannelId: null,
+      starCitizenStartedAt: null,
+      lastKnownStarCitizen: false,
+      tracked: false,
+    },
+  };
+}
+
+function createEmptyTextChannel(channelId, name = 'Unknown Channel') {
+  return {
+    channelId,
+    name,
+    messages: createDailyStatMap(),
+    totals: {
+      messages: 0,
+    },
+  };
+}
+
+function createEmptyVoiceChannel(channelId, name = 'Unknown Voice') {
+  return {
+    channelId,
+    name,
+    voiceSeconds: createDailyStatMap(),
+    totals: {
+      voiceSeconds: 0,
+    },
+  };
+}
+
+function parseLegacyDays(customId, fallback = 7) {
+  const parsed = Number(String(customId || '').split(':').pop());
+  return [1, 7, 14, 30].includes(parsed) ? parsed : fallback;
+}
+
+function encodeStatsButton(action, panel, targetId, days, category = 'overview', showTime = false) {
+  return `stats:${action}:${panel}:${targetId || 'global'}:${days}:${category}:${showTime ? 1 : 0}`;
+}
+
+function decodeStatsButton(customId) {
+  const parts = String(customId || '').split(':');
+
+  if (parts.length >= 7 && parts[0] === 'stats') {
+    return {
+      mode: 'modern',
+      action: parts[1],
+      panel: parts[2],
+      targetId: parts[3],
+      days: [1, 7, 14, 30].includes(Number(parts[4])) ? Number(parts[4]) : 7,
+      category: parts[5] || 'overview',
+      showTime: parts[6] === '1',
+    };
+  }
+
+  if (parts.length >= 4 && parts[0] === 'stats') {
+    return {
+      mode: 'legacy',
+      action: 'range',
+      panel: parts[1],
+      targetId: parts[2],
+      days: parseLegacyDays(customId, 7),
+      category: 'overview',
+      showTime: false,
+    };
+  }
+
+  return null;
+}
+
+function formatHours(seconds) {
+  return `${(Number(seconds || 0) / 3600).toFixed(1)}h`;
+}
+
+function clampFieldText(text, fallback = 'No data yet.') {
+  const value = String(text || '').trim();
+  if (!value) return fallback;
+  return value.length > 1024 ? `${value.slice(0, 1021)}…` : value;
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString('en-GB');
+}
+
+function formatSessionLength(startedAt) {
+  if (!startedAt) return '—';
+  return formatHours(Math.max(0, Math.floor((now() - startedAt) / 1000)));
+}
+
 class StatsTracker {
   constructor(client) {
     this.client = client;
     this.state = safeReadJson(STATE_FILE, {
       users: {},
+      textChannels: {},
+      voiceChannels: {},
       concurrency: {},
       peaks: {},
       meta: { createdAt: now(), lastSavedAt: null },
@@ -99,7 +194,17 @@ class StatsTracker {
     this.client.on('messageCreate', message => {
       try {
         if (!message.guild || message.author?.bot) return;
-        this.incrementMessage(message.author.id, message.author.username || message.member?.displayName || 'Unknown User');
+        if (!this.memberHasTrackedRole(message.member)) return;
+
+        const username = message.member?.displayName || message.author?.username || 'Unknown User';
+        const channelName = message.channel?.name || message.channel?.id || 'unknown-channel';
+
+        this.incrementMessage(
+          message.author.id,
+          username,
+          message.channel.id,
+          channelName
+        );
       } catch (error) {
         console.error('messageCreate tracker error:', error);
       }
@@ -109,28 +214,60 @@ class StatsTracker {
       try {
         const member = newState.member || oldState.member;
         if (!member || member.user?.bot) return;
-        const userId = member.id;
-        const username = member.user.username || member.displayName || 'Unknown User';
-        const wasInVoice = Boolean(oldState.channelId);
-        const isInVoice = Boolean(newState.channelId);
 
-        if (!wasInVoice && isInVoice) {
-          this.startVoice(userId, username);
-        } else if (wasInVoice && !isInVoice) {
+        const userId = member.id;
+        const username = member.displayName || member.user.username || 'Unknown User';
+        const oldChannelId = oldState.channelId || null;
+        const newChannelId = newState.channelId || null;
+        const newChannelName = newState.channel?.name || newChannelId || 'Unknown Voice';
+        const isTracked = this.memberHasTrackedRole(member);
+
+        if (!isTracked) {
           this.stopVoice(userId, username);
+          this.stopStarCitizen(userId, username);
+          const user = this.getUser(userId, username);
+          user.current.tracked = false;
+          return;
+        }
+
+        const user = this.getUser(userId, username);
+        user.current.tracked = true;
+
+        if (!oldChannelId && newChannelId) {
+          this.startVoice(userId, username, newChannelId, newChannelName);
+        } else if (oldChannelId && !newChannelId) {
+          this.stopVoice(userId, username);
+        } else if (oldChannelId && newChannelId && oldChannelId !== newChannelId) {
+          this.stopVoice(userId, username);
+          this.startVoice(userId, username, newChannelId, newChannelName);
         }
       } catch (error) {
         console.error('voiceStateUpdate tracker error:', error);
       }
     });
 
-    this.client.on('presenceUpdate', async (oldPresence, newPresence) => {
+    this.client.on('presenceUpdate', (oldPresence, newPresence) => {
       try {
         const presence = newPresence || oldPresence;
         const member = presence?.member;
         if (!member || member.user?.bot) return;
+
         const userId = member.id;
-        const username = member.user.username || member.displayName || 'Unknown User';
+        const username = member.displayName || member.user.username || 'Unknown User';
+        const isTracked = this.memberHasTrackedRole(member);
+
+        if (!isTracked) {
+          this.stopStarCitizen(userId, username);
+          this.stopVoice(userId, username);
+          const user = this.getUser(userId, username);
+          user.current.tracked = false;
+          this.captureConcurrencySnapshot(member.guild);
+          return;
+        }
+
+        const user = this.getUser(userId, username);
+        user.current.tracked = true;
+
         const oldPlaying = this.isPlayingStarCitizen(oldPresence);
         const newPlaying = this.isPlayingStarCitizen(newPresence);
 
@@ -151,16 +288,65 @@ class StatsTracker {
     this.client.on('guildMemberRemove', member => {
       try {
         if (member.user?.bot) return;
-        this.stopVoice(member.id, member.user.username || member.displayName || 'Unknown User');
-        this.stopStarCitizen(member.id, member.user.username || member.displayName || 'Unknown User');
+        this.stopVoice(member.id, member.displayName || member.user.username || 'Unknown User');
+        this.stopStarCitizen(member.id, member.displayName || member.user.username || 'Unknown User');
       } catch (error) {
         console.error('guildMemberRemove tracker error:', error);
       }
     });
+
+    this.client.on('guildMemberUpdate', (oldMember, newMember) => {
+      try {
+        if (newMember.user?.bot) return;
+
+        const hadRole = this.memberHasTrackedRole(oldMember);
+        const hasRole = this.memberHasTrackedRole(newMember);
+        const username = newMember.displayName || newMember.user.username || 'Unknown User';
+        const user = this.getUser(newMember.id, username);
+
+        if (!hadRole && hasRole) {
+          user.current.tracked = true;
+
+          if (newMember.voice?.channelId) {
+            this.startVoice(
+              newMember.id,
+              username,
+              newMember.voice.channelId,
+              newMember.voice.channel?.name || newMember.voice.channelId
+            );
+          }
+
+          if (this.isPlayingStarCitizen(newMember.presence)) {
+            this.startStarCitizen(newMember.id, username);
+          }
+        }
+
+        if (hadRole && !hasRole) {
+          user.current.tracked = false;
+          this.stopVoice(newMember.id, username);
+          this.stopStarCitizen(newMember.id, username);
+        }
+
+        this.captureConcurrencySnapshot(newMember.guild);
+      } catch (error) {
+        console.error('guildMemberUpdate tracker error:', error);
+      }
+    });
+  }
+
+  memberHasTrackedRole(member) {
+    if (!member || !member.roles?.cache) return false;
+    if (TRACKED_ROLE_ID) return member.roles.cache.has(TRACKED_ROLE_ID);
+
+    const target = String(TRACKED_ROLE_NAME || '').replace(/^@/, '').trim().toLowerCase();
+    if (!target) return false;
+
+    return member.roles.cache.some(role => String(role.name || '').trim().toLowerCase() === target);
   }
 
   async hydrateGuild(guild) {
     if (!guild) return;
+
     try {
       await guild.members.fetch();
     } catch (error) {
@@ -169,10 +355,24 @@ class StatsTracker {
 
     for (const member of guild.members.cache.values()) {
       if (member.user?.bot) continue;
-      const username = member.user.username || member.displayName || 'Unknown User';
-      this.touchUser(member.id, username);
-      if (member.voice?.channelId) this.startVoice(member.id, username);
-      if (this.isPlayingStarCitizen(member.presence)) this.startStarCitizen(member.id, username);
+      if (!this.memberHasTrackedRole(member)) continue;
+
+      const username = member.displayName || member.user.username || 'Unknown User';
+      const user = this.touchUser(member.id, username);
+      user.current.tracked = true;
+
+      if (member.voice?.channelId) {
+        this.startVoice(
+          member.id,
+          username,
+          member.voice.channelId,
+          member.voice.channel?.name || member.voice.channelId
+        );
+      }
+
+      if (this.isPlayingStarCitizen(member.presence)) {
+        this.startStarCitizen(member.id, username);
+      }
     }
 
     this.captureConcurrencySnapshot(guild);
@@ -181,11 +381,17 @@ class StatsTracker {
 
   isPlayingStarCitizen(presence) {
     const activities = presence?.activities || [];
-    return activities.some(activity => STAR_CITIZEN_MATCH.test(activity?.name || '') || STAR_CITIZEN_MATCH.test(activity?.details || ''));
+    return activities.some(activity =>
+      STAR_CITIZEN_MATCH.test(activity?.name || '') ||
+      STAR_CITIZEN_MATCH.test(activity?.details || '')
+    );
   }
 
   getUser(userId, username = 'Unknown User') {
-    if (!this.state.users[userId]) this.state.users[userId] = createEmptyUser(userId, username);
+    if (!this.state.users[userId]) {
+      this.state.users[userId] = createEmptyUser(userId, username);
+    }
+
     this.touchUser(userId, username);
     return this.state.users[userId];
   }
@@ -197,34 +403,95 @@ class StatsTracker {
     return user;
   }
 
-  incrementMessage(userId, username) {
+  getTextChannel(channelId, channelName = 'Unknown Channel') {
+    if (!channelId) return null;
+    if (!this.state.textChannels[channelId]) {
+      this.state.textChannels[channelId] = createEmptyTextChannel(channelId, channelName);
+    }
+
+    const channel = this.state.textChannels[channelId];
+    if (channelName) channel.name = channelName;
+    return channel;
+  }
+
+  getVoiceChannel(channelId, channelName = 'Unknown Voice') {
+    if (!channelId) return null;
+    if (!this.state.voiceChannels[channelId]) {
+      this.state.voiceChannels[channelId] = createEmptyVoiceChannel(channelId, channelName);
+    }
+
+    const channel = this.state.voiceChannels[channelId];
+    if (channelName) channel.name = channelName;
+    return channel;
+  }
+
+  incrementMessage(userId, username, channelId = null, channelName = null) {
     const user = this.getUser(userId, username);
     const dayKey = getDayKey();
+
     user.messages[dayKey] = (user.messages[dayKey] || 0) + 1;
     user.totals.messages += 1;
+
+    const textChannel = this.getTextChannel(channelId, channelName);
+    if (textChannel) {
+      textChannel.messages[dayKey] = (textChannel.messages[dayKey] || 0) + 1;
+      textChannel.totals.messages += 1;
+    }
+
     this.scheduleSave();
   }
 
-  addSeconds(map, totalsKey, userId, username, seconds, dayKey = getDayKey()) {
+  addSeconds(mapKey, totalsKey, userId, username, seconds, dayKey = getDayKey()) {
     if (seconds <= 0) return;
+
     const user = this.getUser(userId, username);
-    map = user[map];
+    const map = user[mapKey];
     map[dayKey] = (map[dayKey] || 0) + seconds;
     user.totals[totalsKey] += seconds;
+
     this.scheduleSave();
   }
 
-  startVoice(userId, username) {
+  addVoiceChannelSeconds(channelId, channelName, seconds, dayKey = getDayKey()) {
+    if (!channelId || seconds <= 0) return;
+
+    const voiceChannel = this.getVoiceChannel(channelId, channelName);
+    if (!voiceChannel) return;
+
+    voiceChannel.voiceSeconds[dayKey] = (voiceChannel.voiceSeconds[dayKey] || 0) + seconds;
+    voiceChannel.totals.voiceSeconds += seconds;
+
+    this.scheduleSave();
+  }
+
+  startVoice(userId, username, channelId, channelName) {
     const user = this.getUser(userId, username);
-    if (!user.current.voiceStartedAt) user.current.voiceStartedAt = now();
+    if (!user.current.voiceStartedAt) {
+      user.current.voiceStartedAt = now();
+      user.current.voiceChannelId = channelId || null;
+      if (channelId) this.getVoiceChannel(channelId, channelName);
+      return;
+    }
+
+    user.current.voiceChannelId = channelId || user.current.voiceChannelId;
+    if (channelId) this.getVoiceChannel(channelId, channelName);
   }
 
   stopVoice(userId, username) {
     const user = this.getUser(userId, username);
     if (!user.current.voiceStartedAt) return;
+
     const elapsed = Math.max(0, Math.floor((now() - user.current.voiceStartedAt) / 1000));
+    const channelId = user.current.voiceChannelId || null;
+    const channelName = channelId
+      ? (this.state.voiceChannels[channelId]?.name || channelId)
+      : 'Unknown Voice';
+
     user.current.voiceStartedAt = null;
+    user.current.voiceChannelId = null;
+
     this.addSeconds('voiceSeconds', 'voiceSeconds', userId, username, elapsed);
+    this.addVoiceChannelSeconds(channelId, channelName, elapsed);
   }
 
   startStarCitizen(userId, username) {
@@ -237,6 +504,7 @@ class StatsTracker {
     const user = this.getUser(userId, username);
     user.current.lastKnownStarCitizen = false;
     if (!user.current.starCitizenStartedAt) return;
+
     const elapsed = Math.max(0, Math.floor((now() - user.current.starCitizenStartedAt) / 1000));
     user.current.starCitizenStartedAt = null;
     this.addSeconds('starCitizenSeconds', 'starCitizenSeconds', userId, username, elapsed);
@@ -247,11 +515,20 @@ class StatsTracker {
     const dayKey = getDayKey(stamp);
 
     for (const user of Object.values(this.state.users)) {
+      if (!user.current?.tracked) continue;
+
       if (user.current.voiceStartedAt) {
         const elapsed = Math.max(0, Math.floor((stamp - user.current.voiceStartedAt) / 1000));
         user.current.voiceStartedAt = stamp;
+
         user.voiceSeconds[dayKey] = (user.voiceSeconds[dayKey] || 0) + elapsed;
         user.totals.voiceSeconds += elapsed;
+
+        if (user.current.voiceChannelId) {
+          const channelId = user.current.voiceChannelId;
+          const channelName = this.state.voiceChannels[channelId]?.name || channelId;
+          this.addVoiceChannelSeconds(channelId, channelName, elapsed, dayKey);
+        }
       }
 
       if (user.current.starCitizenStartedAt) {
@@ -274,11 +551,13 @@ class StatsTracker {
 
   captureConcurrencySnapshot(guild) {
     if (!guild) return;
+
     let count = 0;
     const names = [];
 
     for (const member of guild.members.cache.values()) {
       if (member.user?.bot) continue;
+      if (!this.memberHasTrackedRole(member)) continue;
       if (this.isPlayingStarCitizen(member.presence)) {
         count += 1;
         names.push(member.displayName || member.user.username || 'Unknown User');
@@ -304,10 +583,20 @@ class StatsTracker {
       cleanupDailyMap(user.starCitizenSeconds || {});
     }
 
+    for (const channel of Object.values(this.state.textChannels || {})) {
+      cleanupDailyMap(channel.messages || {});
+    }
+
+    for (const channel of Object.values(this.state.voiceChannels || {})) {
+      cleanupDailyMap(channel.voiceSeconds || {});
+    }
+
     const cutoff = new Date(now() - MAX_DAYS * ONE_DAY_MS).toISOString().slice(0, 10);
+
     for (const key of Object.keys(this.state.concurrency || {})) {
       if (key < cutoff) delete this.state.concurrency[key];
     }
+
     for (const key of Object.keys(this.state.peaks || {})) {
       if (key < cutoff) delete this.state.peaks[key];
     }
@@ -315,6 +604,7 @@ class StatsTracker {
 
   scheduleSave() {
     if (this.saveTimer) return;
+
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       this.save();
@@ -339,9 +629,31 @@ class StatsTracker {
     return dayKeys.reduce((sum, dayKey) => sum + Number(map?.[dayKey] || 0), 0);
   }
 
+  getTrackedMemberIds() {
+    const ids = new Set();
+
+    for (const guild of this.client.guilds.cache.values()) {
+      for (const member of guild.members.cache.values()) {
+        if (member.user?.bot) continue;
+        if (this.memberHasTrackedRole(member)) ids.add(member.id);
+      }
+    }
+
+    return ids;
+  }
+
+  getTrackedUsers() {
+    const trackedIds = this.getTrackedMemberIds();
+    return Array.from(trackedIds)
+      .map(userId => this.state.users[userId])
+      .filter(Boolean);
+  }
+
   getLeaderboard(days = 7) {
     const dayKeys = this.getRangeDayKeys(days);
-    const rows = Object.values(this.state.users)
+    const trackedUsers = this.getTrackedUsers();
+
+    const rows = trackedUsers
       .map(user => ({
         userId: user.userId,
         username: user.username,
@@ -356,12 +668,42 @@ class StatsTracker {
       voice: [...rows].sort((a, b) => b.voiceSeconds - a.voiceSeconds).slice(0, 10),
       starCitizen: [...rows].sort((a, b) => b.starCitizenSeconds - a.starCitizenSeconds).slice(0, 10),
       dayKeys,
+      trackedUsers,
     };
+  }
+
+  getTextChannelLeaderboard(days = 7) {
+    const dayKeys = this.getRangeDayKeys(days);
+
+    return Object.values(this.state.textChannels || {})
+      .map(channel => ({
+        channelId: channel.channelId,
+        name: channel.name,
+        messages: this.sumMap(channel.messages, dayKeys),
+      }))
+      .filter(row => row.messages > 0)
+      .sort((a, b) => b.messages - a.messages)
+      .slice(0, 10);
+  }
+
+  getVoiceChannelLeaderboard(days = 7) {
+    const dayKeys = this.getRangeDayKeys(days);
+
+    return Object.values(this.state.voiceChannels || {})
+      .map(channel => ({
+        channelId: channel.channelId,
+        name: channel.name,
+        voiceSeconds: this.sumMap(channel.voiceSeconds, dayKeys),
+      }))
+      .filter(row => row.voiceSeconds > 0)
+      .sort((a, b) => b.voiceSeconds - a.voiceSeconds)
+      .slice(0, 10);
   }
 
   getUserStats(userId, days = 7) {
     const user = this.state.users[userId];
     if (!user) return null;
+
     const dayKeys = this.getRangeDayKeys(days);
 
     return {
@@ -371,6 +713,10 @@ class StatsTracker {
         messages: this.sumMap(user.messages, dayKeys),
         voiceSeconds: this.sumMap(user.voiceSeconds, dayKeys),
         starCitizenSeconds: this.sumMap(user.starCitizenSeconds, dayKeys),
+      },
+      current: {
+        voiceStartedAt: user.current?.voiceStartedAt || null,
+        starCitizenStartedAt: user.current?.starCitizenStartedAt || null,
       },
       daily: dayKeys.map(dayKey => ({
         dayKey,
@@ -384,9 +730,12 @@ class StatsTracker {
 
   getCurrentPlayers(guild) {
     if (!guild) return { count: 0, players: [] };
+
     const players = [];
+
     for (const member of guild.members.cache.values()) {
       if (member.user?.bot) continue;
+      if (!this.memberHasTrackedRole(member)) continue;
       if (this.isPlayingStarCitizen(member.presence)) {
         players.push({
           id: member.id,
@@ -395,6 +744,7 @@ class StatsTracker {
         });
       }
     }
+
     players.sort((a, b) => a.name.localeCompare(b.name));
     return { count: players.length, players };
   }
@@ -411,7 +761,7 @@ class StatsTracker {
     return best;
   }
 
-  buildQuickChartUrl(title, labels, datasets) {
+  buildQuickChartUrl(title, labels, datasets, yLabel = '') {
     const config = {
       type: 'line',
       data: {
@@ -419,174 +769,536 @@ class StatsTracker {
         datasets,
       },
       options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: {
+          padding: { top: 18, right: 18, bottom: 10, left: 12 },
+        },
         plugins: {
-          title: { display: true, text: title },
-          legend: { display: true },
+          title: {
+            display: true,
+            text: title,
+            color: '#e5e7eb',
+            font: { size: 18, weight: 'bold' },
+            padding: { bottom: 14 },
+          },
+          legend: {
+            display: true,
+            labels: {
+              color: '#cbd5e1',
+              boxWidth: 12,
+              boxHeight: 12,
+              usePointStyle: true,
+              pointStyle: 'circle',
+              padding: 16,
+              font: { size: 12 },
+            },
+          },
+          tooltip: {
+            enabled: true,
+            backgroundColor: '#111827',
+            titleColor: '#f8fafc',
+            bodyColor: '#e2e8f0',
+            borderColor: '#334155',
+            borderWidth: 1,
+          },
+        },
+        elements: {
+          line: {
+            tension: 0.35,
+            borderWidth: 3,
+            fill: false,
+          },
+          point: {
+            radius: 3,
+            hoverRadius: 5,
+            borderWidth: 2,
+            backgroundColor: '#0f172a',
+          },
         },
         scales: {
-          y: { beginAtZero: true },
+          x: {
+            ticks: { color: '#94a3b8', font: { size: 11 } },
+            grid: { color: 'rgba(148,163,184,0.08)' },
+          },
+          y: {
+            beginAtZero: true,
+            ticks: { color: '#94a3b8', font: { size: 11 } },
+            grid: { color: 'rgba(148,163,184,0.10)' },
+            title: yLabel
+              ? {
+                  display: true,
+                  text: yLabel,
+                  color: '#94a3b8',
+                  font: { size: 11, weight: 'bold' },
+                }
+              : undefined,
+          },
         },
       },
     };
 
-    return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}`;
-  }
-
-  formatHours(seconds) {
-    return `${(seconds / 3600).toFixed(1)}h`;
+    return `https://quickchart.io/chart?width=1000&height=320&devicePixelRatio=2&backgroundColor=%230b1120&c=${encodeURIComponent(JSON.stringify(config))}`;
   }
 
   formatLeaderboardRows(rows, type) {
     if (!rows.length) return 'No data yet.';
+
     return rows.map((row, index) => {
       let value = '0';
-      if (type === 'messages') value = row.messages.toLocaleString();
-      if (type === 'voice') value = this.formatHours(row.voiceSeconds);
-      if (type === 'starCitizen') value = this.formatHours(row.starCitizenSeconds);
+      if (type === 'messages') value = `${formatNumber(row.messages)} msgs`;
+      if (type === 'voice') value = formatHours(row.voiceSeconds);
+      if (type === 'starCitizen') value = formatHours(row.starCitizenSeconds);
       return `**${index + 1}.** ${row.username} — ${value}`;
     }).join('\n');
   }
 
-  buildRangeButtons(view, targetId, days) {
-    const ranges = [1, 7, 14, 30];
+  formatTextChannelRows(rows) {
+    if (!rows.length) return 'No data yet.';
+
+    return rows.map((row, index) => {
+      const mention = row.channelId ? `<#${row.channelId}>` : row.name;
+      return `**${index + 1}.** ${mention} — ${formatNumber(row.messages)} msgs`;
+    }).join('\n');
+  }
+
+  formatVoiceChannelRows(rows) {
+    if (!rows.length) return 'No data yet.';
+
+    return rows.map((row, index) => {
+      const mention = row.channelId ? `<#${row.channelId}>` : row.name;
+      return `**${index + 1}.** ${mention} — ${formatHours(row.voiceSeconds)}`;
+    }).join('\n');
+  }
+
+  buildTopSelectRow(days = 7, category = 'overview') {
     return new ActionRowBuilder().addComponents(
-      ...ranges.map(range => new ButtonBuilder()
-        .setCustomId(`stats:${view}:${targetId || 'global'}:${range}`)
-        .setLabel(`${range}d`)
-        .setStyle(range === days ? ButtonStyle.Primary : ButtonStyle.Secondary))
+      new StringSelectMenuBuilder()
+        .setCustomId(`stats:view:top:global:${days}`)
+        .setPlaceholder('Switch leaderboard view')
+        .addOptions([
+          {
+            label: 'Overview',
+            value: 'overview',
+            description: 'Full statboard summary',
+            default: category === 'overview',
+          },
+          {
+            label: 'Messages',
+            value: 'messages',
+            description: 'Message leaderboard focus',
+            default: category === 'messages',
+          },
+          {
+            label: 'Voice',
+            value: 'voice',
+            description: 'Voice leaderboard focus',
+            default: category === 'voice',
+          },
+          {
+            label: 'Playtime',
+            value: 'starCitizen',
+            description: 'Star Citizen playtime focus',
+            default: category === 'starCitizen',
+          },
+          {
+            label: 'Channels',
+            value: 'channels',
+            description: 'Top text and voice channels',
+            default: category === 'channels',
+          },
+        ])
     );
   }
 
-  buildTopEmbed(days = 7) {
-    const board = this.getLeaderboard(days);
-    const labels = board.dayKeys.map(formatDisplayDate);
-    const chartUrl = this.buildQuickChartUrl(
-      `Server activity over ${days} day${days === 1 ? '' : 's'}`,
-      labels,
-      [
+  buildStatsControlRow(panel, targetId, days, category = 'overview', showTime = false) {
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(encodeStatsButton('refresh', panel, targetId, days, category, showTime))
+        .setLabel('Refresh')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(encodeStatsButton('time', panel, targetId, days, category, showTime))
+        .setEmoji('🗓️')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+
+  buildRangeButtons(panel, targetId, days, category = 'overview', showTime = true) {
+    const ranges = [1, 7, 14, 30];
+
+    return new ActionRowBuilder().addComponents(
+      ...ranges.map(range =>
+        new ButtonBuilder()
+          .setCustomId(encodeStatsButton('range', panel, targetId, range, category, showTime))
+          .setLabel(`${range}d`)
+          .setStyle(range === days ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      )
+    );
+  }
+
+  buildChartEmbeds(titlePrefix, labels, messagesData, voiceData, starCitizenData) {
+    const base = embed => embed.setThumbnail(THUMBNAIL_URL).setColor(COLORS.brand);
+
+    const messagesEmbed = base(new EmbedBuilder())
+      .setTitle(`${titlePrefix} · Messages`)
+      .setDescription('Daily message activity')
+      .setImage(this.buildQuickChartUrl(`${titlePrefix} · Messages`, labels, [
         {
           label: 'Messages',
-          data: board.dayKeys.map(dayKey => Object.values(this.state.users).reduce((sum, user) => sum + Number(user.messages?.[dayKey] || 0), 0)),
-          borderColor: '#60a5fa',
-          fill: false,
+          data: messagesData,
+          borderColor: COLORS.messages,
+          pointBorderColor: COLORS.messages,
         },
+      ], 'Messages'));
+
+    const voiceEmbed = base(new EmbedBuilder())
+      .setTitle(`${titlePrefix} · Voice Hours`)
+      .setDescription('Daily voice activity')
+      .setImage(this.buildQuickChartUrl(`${titlePrefix} · Voice Hours`, labels, [
         {
           label: 'Voice hours',
-          data: board.dayKeys.map(dayKey => Object.values(this.state.users).reduce((sum, user) => sum + Number(user.voiceSeconds?.[dayKey] || 0), 0) / 3600),
-          borderColor: '#34d399',
-          fill: false,
+          data: voiceData,
+          borderColor: COLORS.voice,
+          pointBorderColor: COLORS.voice,
         },
+      ], 'Hours'));
+
+    const playtimeEmbed = base(new EmbedBuilder())
+      .setTitle(`${titlePrefix} · Playtime Hours`)
+      .setDescription('Daily Star Citizen playtime')
+      .setImage(this.buildQuickChartUrl(`${titlePrefix} · Playtime Hours`, labels, [
         {
-          label: 'Star Citizen hours',
-          data: board.dayKeys.map(dayKey => Object.values(this.state.users).reduce((sum, user) => sum + Number(user.starCitizenSeconds?.[dayKey] || 0), 0) / 3600),
-          borderColor: '#f59e0b',
-          fill: false,
+          label: 'Playtime hours',
+          data: starCitizenData,
+          borderColor: COLORS.starCitizen,
+          pointBorderColor: COLORS.starCitizen,
         },
-      ]
-    );
+      ], 'Hours'));
 
-    const embed = new EmbedBuilder()
-      .setColor(0x22d3ee)
-      .setTitle(`Server leaderboards · last ${days} day${days === 1 ? '' : 's'}`)
-      .setThumbnail(THUMBNAIL_URL)
-      .setImage(chartUrl)
-      .addFields(
-        { name: 'Top voice hours', value: this.formatLeaderboardRows(board.voice, 'voice'), inline: true },
-        { name: 'Top messages', value: this.formatLeaderboardRows(board.messages, 'messages'), inline: true },
-        { name: 'Top Star Citizen hours', value: this.formatLeaderboardRows(board.starCitizen, 'starCitizen'), inline: true },
-      )
-      .setFooter({ text: 'Buttons change the tracked timescale.' });
-
-    return { embeds: [embed], components: [this.buildRangeButtons('top', 'global', days)] };
+    return [messagesEmbed, voiceEmbed, playtimeEmbed];
   }
 
-  buildUserStatsEmbed(userId, days = 7) {
+  buildTopEmbed(days = 7, category = 'overview', showTime = false) {
+    const board = this.getLeaderboard(days);
+    const textChannels = this.getTextChannelLeaderboard(days);
+    const voiceChannels = this.getVoiceChannelLeaderboard(days);
+    const labels = board.dayKeys.map(formatDisplayDate);
+
+    const messagesSeries = board.dayKeys.map(dayKey =>
+      board.trackedUsers.reduce((sum, user) => sum + Number(user.messages?.[dayKey] || 0), 0)
+    );
+    const voiceSeries = board.dayKeys.map(dayKey =>
+      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.voiceSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2))
+    );
+    const playtimeSeries = board.dayKeys.map(dayKey =>
+      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.starCitizenSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2))
+    );
+
+    let description = `Tracking **@${TRACKED_ROLE_NAME.replace(/^@/, '')}** members only.`;
+    let fields = [
+      {
+        name: 'Tracked members',
+        value: formatNumber(board.trackedUsers.length),
+        inline: true,
+      },
+      {
+        name: 'Window',
+        value: `${days} day${days === 1 ? '' : 's'}`,
+        inline: true,
+      },
+      {
+        name: 'Mode',
+        value: category === 'starCitizen' ? 'Playtime' : category.charAt(0).toUpperCase() + category.slice(1),
+        inline: true,
+      },
+    ];
+
+    if (category === 'messages') {
+      fields.push({
+        name: 'Top message senders',
+        value: clampFieldText(this.formatLeaderboardRows(board.messages, 'messages')),
+        inline: false,
+      });
+    } else if (category === 'voice') {
+      fields.push({
+        name: 'Top voice members',
+        value: clampFieldText(this.formatLeaderboardRows(board.voice, 'voice')),
+        inline: false,
+      });
+    } else if (category === 'starCitizen') {
+      fields.push({
+        name: 'Top playtime members',
+        value: clampFieldText(this.formatLeaderboardRows(board.starCitizen, 'starCitizen')),
+        inline: false,
+      });
+    } else if (category === 'channels') {
+      fields.push(
+        {
+          name: 'Top text channels',
+          value: clampFieldText(this.formatTextChannelRows(textChannels)),
+          inline: true,
+        },
+        {
+          name: 'Top voice channels',
+          value: clampFieldText(this.formatVoiceChannelRows(voiceChannels)),
+          inline: true,
+        }
+      );
+    } else {
+      fields.push(
+        {
+          name: 'Top messages',
+          value: clampFieldText(this.formatLeaderboardRows(board.messages, 'messages')),
+          inline: true,
+        },
+        {
+          name: 'Top voice',
+          value: clampFieldText(this.formatLeaderboardRows(board.voice, 'voice')),
+          inline: true,
+        },
+        {
+          name: 'Top playtime',
+          value: clampFieldText(this.formatLeaderboardRows(board.starCitizen, 'starCitizen')),
+          inline: true,
+        }
+      );
+    }
+
+    const summaryEmbed = new EmbedBuilder()
+      .setColor(COLORS.brand)
+      .setTitle(`SPACEWHLE Statboard · Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription(description)
+      .setThumbnail(THUMBNAIL_URL)
+      .addFields(fields)
+      .setFooter({ text: 'Clean server analytics for SPACEWHLE members only.' });
+
+    const embeds = [
+      summaryEmbed,
+      ...this.buildChartEmbeds('Server', labels, messagesSeries, voiceSeries, playtimeSeries),
+    ];
+
+    const components = [
+      this.buildTopSelectRow(days, category),
+      this.buildStatsControlRow('top', 'global', days, category, showTime),
+    ];
+
+    if (showTime) {
+      components.push(this.buildRangeButtons('top', 'global', days, category, true));
+    }
+
+    return {
+      embeds,
+      components,
+    };
+  }
+
+  buildUserStatsEmbed(userId, days = 7, showTime = false) {
+    const memberStillTracked = this.getTrackedMemberIds().has(userId);
     const stats = this.getUserStats(userId, days);
-    if (!stats) {
+
+    if (!stats || !memberStillTracked) {
+      const components = [
+        this.buildStatsControlRow('user', userId, days, 'overview', showTime),
+      ];
+
+      if (showTime) {
+        components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
+      }
+
       return {
-        content: 'No tracked data for that user yet.',
+        content: 'No tracked SPACEWHLE data for that user yet.',
         embeds: [],
-        components: [this.buildRangeButtons('user', userId, days)],
+        components,
       };
     }
 
-    const chartUrl = this.buildQuickChartUrl(
-      `${stats.username} · last ${days} day${days === 1 ? '' : 's'}`,
-      stats.daily.map(day => day.label),
-      [
-        { label: 'Messages', data: stats.daily.map(day => day.messages), borderColor: '#60a5fa', fill: false },
-        { label: 'Voice hours', data: stats.daily.map(day => day.voiceHours.toFixed(2)), borderColor: '#34d399', fill: false },
-        { label: 'Star Citizen hours', data: stats.daily.map(day => day.starCitizenHours.toFixed(2)), borderColor: '#f59e0b', fill: false },
-      ],
-    );
-
-    const embed = new EmbedBuilder()
-      .setColor(0x38bdf8)
-      .setTitle(`${stats.username} · activity stats`)
+    const summaryEmbed = new EmbedBuilder()
+      .setColor(COLORS.brand)
+      .setTitle(`${stats.username} · Stat Profile`)
+      .setDescription(`Tracking **@${TRACKED_ROLE_NAME.replace(/^@/, '')}** activity only.`)
       .setThumbnail(THUMBNAIL_URL)
-      .setImage(chartUrl)
       .addFields(
-        { name: 'Messages', value: stats.totals.messages.toLocaleString(), inline: true },
-        { name: 'Voice hours', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h`, inline: true },
-        { name: 'Star Citizen hours', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h`, inline: true },
+        { name: 'Messages', value: formatNumber(stats.totals.messages), inline: true },
+        { name: 'Voice hours', value: formatHours(stats.totals.voiceSeconds), inline: true },
+        { name: 'Playtime hours', value: formatHours(stats.totals.starCitizenSeconds), inline: true },
+        { name: 'Current voice session', value: formatSessionLength(stats.current.voiceStartedAt), inline: true },
+        { name: 'Current SC session', value: formatSessionLength(stats.current.starCitizenStartedAt), inline: true },
+        { name: 'Window', value: `${days} day${days === 1 ? '' : 's'}`, inline: true },
       )
-      .setFooter({ text: 'Tracked from presence, voice state, and message events.' });
+      .setFooter({ text: 'Presence, messages, and voice state are tracked live.' });
 
-    return { embeds: [embed], components: [this.buildRangeButtons('user', userId, days)] };
+    const embeds = [
+      summaryEmbed,
+      ...this.buildChartEmbeds(
+        stats.username,
+        stats.daily.map(day => day.label),
+        stats.daily.map(day => day.messages),
+        stats.daily.map(day => Number(day.voiceHours.toFixed(2))),
+        stats.daily.map(day => Number(day.starCitizenHours.toFixed(2)))
+      ),
+    ];
+
+    const components = [
+      this.buildStatsControlRow('user', userId, days, 'overview', showTime),
+    ];
+
+    if (showTime) {
+      components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
+    }
+
+    return {
+      embeds,
+      components,
+    };
   }
 
-  buildPlayersEmbed(guild, days = 7) {
+  buildPlayersEmbed(guild, days = 7, showTime = false) {
     const current = this.getCurrentPlayers(guild);
     const peak = this.getPeakForRange(days);
     const dayKeys = this.getRangeDayKeys(days);
-    const chartUrl = this.buildQuickChartUrl(
-      `Star Citizen players online · last ${days} day${days === 1 ? '' : 's'}`,
-      dayKeys.map(formatDisplayDate),
-      [{
-        label: 'Peak concurrent players',
-        data: dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0)),
-        borderColor: '#a78bfa',
-        fill: false,
-      }],
-    );
+
+    const chartEmbed = new EmbedBuilder()
+      .setColor(COLORS.brand)
+      .setTitle('Star Citizen Concurrency')
+      .setDescription('Tracked from SPACEWHLE member presence only.')
+      .setThumbnail(THUMBNAIL_URL)
+      .setImage(this.buildQuickChartUrl(
+        `Star Citizen Peak Concurrency · Last ${days} Day${days === 1 ? '' : 's'}`,
+        dayKeys.map(formatDisplayDate),
+        [
+          {
+            label: 'Peak players',
+            data: dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0)),
+            borderColor: COLORS.accent,
+            pointBorderColor: COLORS.accent,
+          },
+        ],
+        'Players'
+      ));
 
     const currentLines = current.players.length
       ? current.players.slice(0, 15).map(player => {
-          const extra = player.startedAt ? ` · ${(Math.max(0, now() - player.startedAt) / 3600000).toFixed(1)}h this session` : '';
+          const extra = player.startedAt ? ` · ${formatSessionLength(player.startedAt)} session` : '';
           return `• ${player.name}${extra}`;
         }).join('\n')
       : 'Nobody currently detected in Star Citizen.';
 
-    const embed = new EmbedBuilder()
-      .setColor(0xa78bfa)
-      .setTitle('Star Citizen player tracker')
+    const summaryEmbed = new EmbedBuilder()
+      .setColor(COLORS.brand)
+      .setTitle('Star Citizen Player Tracker')
+      .setDescription(`Live player panel for **@${TRACKED_ROLE_NAME.replace(/^@/, '')}**.`)
       .setThumbnail(THUMBNAIL_URL)
-      .setImage(chartUrl)
       .addFields(
         { name: 'Playing right now', value: String(current.count), inline: true },
         { name: `Peak in last ${days}d`, value: String(peak.count || 0), inline: true },
         { name: 'Peak time', value: peak.ts ? `<t:${Math.floor(peak.ts / 1000)}:f>` : 'No data yet', inline: true },
-        { name: 'Current players', value: currentLines.slice(0, 1024), inline: false },
+        { name: 'Current players', value: clampFieldText(currentLines, 'Nobody currently detected in Star Citizen.'), inline: false },
       )
-      .setFooter({ text: 'Presence must show Star Citizen to be tracked.' });
+      .setFooter({ text: 'Users must show Star Citizen in presence to count.' });
 
-    return { embeds: [embed], components: [this.buildRangeButtons('players', guild?.id || 'global', days)] };
+    const components = [
+      this.buildStatsControlRow('players', guild?.id || 'global', days, 'overview', showTime),
+    ];
+
+    if (showTime) {
+      components.push(this.buildRangeButtons('players', guild?.id || 'global', days, 'overview', true));
+    }
+
+    return {
+      embeds: [summaryEmbed, chartEmbed],
+      components,
+    };
+  }
+
+  async handleSelectMenu(interaction) {
+    const parts = String(interaction.customId || '').split(':');
+
+    if (parts[0] !== 'stats' || parts[1] !== 'view') return null;
+
+    const panel = parts[2] || 'top';
+    const targetId = parts[3] || 'global';
+    const days = [1, 7, 14, 30].includes(Number(parts[4])) ? Number(parts[4]) : 7;
+    const selected = interaction.values?.[0] || 'overview';
+
+    if (panel === 'top') {
+      return interaction.editReply(this.buildTopEmbed(days, selected, false));
+    }
+
+    return null;
   }
 
   async handleButton(interaction) {
-    const [, view, targetId] = String(interaction.customId || '').split(':');
-    const days = rangeDaysFromCustomId(interaction.customId);
+    const decoded = decodeStatsButton(interaction.customId);
 
-    if (view === 'top') {
-      return interaction.editReply(this.buildTopEmbed(days));
+    if (!decoded) return null;
+
+    if (decoded.mode === 'legacy') {
+      if (decoded.panel === 'top') {
+        return interaction.editReply(this.buildTopEmbed(decoded.days, 'overview', false));
+      }
+
+      if (decoded.panel === 'user') {
+        return interaction.editReply(this.buildUserStatsEmbed(decoded.targetId, decoded.days, false));
+      }
+
+      if (decoded.panel === 'players') {
+        return interaction.editReply(this.buildPlayersEmbed(interaction.guild, decoded.days, false));
+      }
+
+      return null;
     }
 
-    if (view === 'user') {
-      return interaction.editReply(this.buildUserStatsEmbed(targetId, days));
+    const { action, panel, targetId, days, category, showTime } = decoded;
+
+    if (action === 'refresh') {
+      if (panel === 'top') {
+        return interaction.editReply(this.buildTopEmbed(days, category, showTime));
+      }
+
+      if (panel === 'user') {
+        return interaction.editReply(this.buildUserStatsEmbed(targetId, days, showTime));
+      }
+
+      if (panel === 'players') {
+        return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, showTime));
+      }
+
+      return null;
     }
 
-    if (view === 'players') {
-      return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days));
+    if (action === 'time') {
+      const nextShowTime = !showTime;
+
+      if (panel === 'top') {
+        return interaction.editReply(this.buildTopEmbed(days, category, nextShowTime));
+      }
+
+      if (panel === 'user') {
+        return interaction.editReply(this.buildUserStatsEmbed(targetId, days, nextShowTime));
+      }
+
+      if (panel === 'players') {
+        return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, nextShowTime));
+      }
+
+      return null;
+    }
+
+    if (action === 'range') {
+      if (panel === 'top') {
+        return interaction.editReply(this.buildTopEmbed(days, category, true));
+      }
+
+      if (panel === 'user') {
+        return interaction.editReply(this.buildUserStatsEmbed(targetId, days, true));
+      }
+
+      if (panel === 'players') {
+        return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, true));
+      }
+
+      return null;
     }
 
     return null;

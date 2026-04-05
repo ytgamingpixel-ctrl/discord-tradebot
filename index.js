@@ -37,10 +37,20 @@ tracker.init();
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-const EMBED_THUMBNAIL_URL =
-  'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
-const EMBED_BANNER_URL =
-  'https://s1.cdn.autoevolution.com/images/news/star-citizen-unveils-a-massive-space-hauler-crowdfunding-passes-400-million-175169_1.jpg';
+const BRAND = {
+  name: 'SPACEWHLE',
+  color: 0x5865f2,
+  success: 0x22c55e,
+  info: 0x38bdf8,
+  warning: 0xf59e0b,
+  danger: 0xef4444,
+  purple: 0x8b5cf6,
+  cyan: 0x22d3ee,
+  thumbnail:
+    'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png',
+  banner:
+    'https://s1.cdn.autoevolution.com/images/news/star-citizen-unveils-a-massive-space-hauler-crowdfunding-passes-400-million-175169_1.jpg',
+};
 
 const STATE_FILE = path.join(__dirname, 'route-state.json');
 
@@ -61,6 +71,16 @@ function normalizeText(value) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString('en-GB');
+}
+
+function truncate(text, max = 1024) {
+  const value = String(text || '');
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
 }
 
 function getArrayPayload(payload) {
@@ -146,6 +166,51 @@ function getRouteState(stateId) {
   return routeStates.get(stateId) || null;
 }
 
+function createBaseEmbed({ color = BRAND.color, title = null, description = null } = {}) {
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setThumbnail(BRAND.thumbnail)
+    .setFooter({ text: `${BRAND.name} • polished command panel` });
+
+  if (title) embed.setTitle(title);
+  if (description) embed.setDescription(description);
+
+  return embed;
+}
+
+function createTradeEmbed({ color = BRAND.cyan, title = null, description = null } = {}) {
+  const embed = createBaseEmbed({ color, title, description });
+  embed.setImage(BRAND.banner);
+  embed.setFooter({ text: `${BRAND.name} Trade Command • live grouped market data` });
+  return embed;
+}
+
+function buildLoadingReply(label = 'Loading panel…') {
+  const embed = createBaseEmbed({
+    color: BRAND.color,
+    title: 'Working…',
+    description: `> ${label}`,
+  });
+
+  return {
+    embeds: [embed],
+    components: [],
+  };
+}
+
+function buildErrorReply(message = 'Something went wrong.') {
+  const embed = createBaseEmbed({
+    color: BRAND.danger,
+    title: 'Update failed',
+    description: message,
+  });
+
+  return {
+    embeds: [embed],
+    components: [],
+  };
+}
+
 function getRiskLabel(score) {
   if (score <= 20) return 'Low';
   if (score <= 40) return 'Moderate';
@@ -200,7 +265,7 @@ async function fetchJson(url) {
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'SPACEWHLE Trade Command Bot',
+        'User-Agent': `${BRAND.name} Trade Command Bot`,
         Accept: 'application/json',
       },
       signal: controller.signal,
@@ -513,6 +578,7 @@ function findMatchingGroup(locationInput) {
     null
   );
 }
+
 function getDockingPreferenceBonus(route) {
   let bonus = 0;
 
@@ -686,7 +752,7 @@ function formatSellListByTerminal(terminals, limitPerTerminal = 8) {
 
     const items = terminal.sells
       .slice(0, limitPerTerminal)
-      .map(item => `${item.commodity} (${item.price.toLocaleString()}, stock ${item.stock || '?'})`)
+      .map(item => `${item.commodity} (${formatNumber(item.price)}, stock ${item.stock || '?'})`)
       .join(', ');
 
     lines.push(`**${terminal.name}**\n${items}`);
@@ -703,7 +769,7 @@ function formatBuyListByTerminal(terminals, limitPerTerminal = 8) {
 
     const items = terminal.buys
       .slice(0, limitPerTerminal)
-      .map(item => `${item.commodity} (${item.price.toLocaleString()}, demand ${item.demand || '?'})`)
+      .map(item => `${item.commodity} (${formatNumber(item.price)}, demand ${item.demand || '?'})`)
       .join(', ');
 
     lines.push(`**${terminal.name}**\n${items}`);
@@ -776,8 +842,14 @@ async function buildRouteResponse(params, existingStateId = null) {
 
   if (!result.route) {
     return {
-      content: 'No matching route found for those filters.',
-      embeds: [],
+      content: null,
+      embeds: [
+        createTradeEmbed({
+          color: BRAND.warning,
+          title: 'No route found',
+          description: 'No matching trade route was found for those filters.',
+        }),
+      ],
       components: [],
       stateId: existingStateId,
     };
@@ -797,33 +869,34 @@ async function buildRouteResponse(params, existingStateId = null) {
 
   const stateId = saveRouteState(nextState, existingStateId);
 
-  const fields = [
+  const embed = createTradeEmbed({
+    color: BRAND.cyan,
+    title: `Best Route • ${route.shipProfile.name}`,
+    description: `**${route.buyShortGroup}** → **${route.sellShortGroup}**`,
+  }).addFields(
     { name: 'Commodity', value: route.commodity, inline: true },
-    { name: 'Start', value: route.buyShortGroup, inline: true },
-    { name: 'Finish', value: route.sellShortGroup, inline: true },
-    { name: 'Cargo Needed', value: `${route.effectiveCargo.toLocaleString()} SCU`, inline: true },
-    { name: 'Ship Cargo', value: `${route.shipProfile.cargo.toLocaleString()} SCU`, inline: true },
-    { name: 'Investment', value: `${route.cargoValue.toLocaleString()} aUEC`, inline: true },
-    { name: 'Profit', value: `${route.totalProfit.toLocaleString()} aUEC`, inline: true },
-    { name: 'ROI', value: `${route.profitPercent.toFixed(1)}%`, inline: true },
-    { name: 'Risk', value: `${route.riskScore}/100 (${getRiskLabel(route.riskScore)})`, inline: true },
-    { name: 'Time', value: route.time.label, inline: true },
-    { name: 'Buy Stock', value: route.buyStock ? `${route.buyStock.toLocaleString()} SCU` : 'Unknown', inline: true },
-    { name: 'Sell Demand', value: route.sellDemand ? `${route.sellDemand.toLocaleString()} SCU` : 'Unknown', inline: true },
-    { name: 'Ship Data Source', value: getShipSourceLabel(), inline: false },
-    { name: 'Risk Reasons', value: route.riskReasons, inline: false },
-  ];
+    { name: 'Cargo Needed', value: `${formatNumber(route.effectiveCargo)} SCU`, inline: true },
+    { name: 'Ship Cargo', value: `${formatNumber(route.shipProfile.cargo)} SCU`, inline: true },
 
-  const embed = new EmbedBuilder()
-    .setColor(0x22d3ee)
-    .setTitle(`Best route for ${route.shipProfile.name}`)
-    .setDescription(`${route.buyShortGroup} → ${route.sellShortGroup}`)
-    .setThumbnail(EMBED_THUMBNAIL_URL)
-    .setImage(EMBED_BANNER_URL)
-    .addFields(fields)
-    .setFooter({
-      text: 'SPACEWHLE Trade Command • live UEX grouped location data',
-    });
+    { name: 'Investment', value: `${formatNumber(route.cargoValue)} aUEC`, inline: true },
+    { name: 'Profit', value: `${formatNumber(route.totalProfit)} aUEC`, inline: true },
+    { name: 'ROI', value: `${route.profitPercent.toFixed(1)}%`, inline: true },
+
+    { name: 'Buy', value: `${route.buyShortGroup}\n${route.buyTerminal}`, inline: true },
+    { name: 'Sell', value: `${route.sellShortGroup}\n${route.sellTerminal}`, inline: true },
+    { name: 'Travel Time', value: route.time.label, inline: true },
+
+    { name: 'Risk', value: `${route.riskScore}/100 • ${getRiskLabel(route.riskScore)}`, inline: true },
+    { name: 'Buy Stock', value: route.buyStock ? `${formatNumber(route.buyStock)} SCU` : 'Unknown', inline: true },
+    { name: 'Sell Demand', value: route.sellDemand ? `${formatNumber(route.sellDemand)} SCU` : 'Unknown', inline: true },
+
+    { name: 'Risk Reasons', value: truncate(route.riskReasons, 1024), inline: false },
+    { name: 'Ship Data Source', value: getShipSourceLabel(), inline: false },
+  );
+
+  embed.setFooter({
+    text: `${BRAND.name} Trade Command • ranked for profit first • live grouped UEX data`,
+  });
 
   return {
     content: null,
@@ -832,15 +905,12 @@ async function buildRouteResponse(params, existingStateId = null) {
     stateId,
   };
 }
+
 async function handleRouteButton(interaction, action, stateId) {
   const state = getRouteState(stateId);
 
   if (!state) {
-    await interaction.editReply({
-      content: 'That button has expired. Run the command again.',
-      embeds: [],
-      components: [],
-    });
+    await interaction.editReply(buildErrorReply('That route panel has expired. Run the command again.'));
     return;
   }
 
@@ -889,9 +959,11 @@ async function handleRouteButton(interaction, action, stateId) {
 client.once(Events.ClientReady, async readyClient => {
   loadStateStoreFromDisk();
   await ensureShipData(false);
+
   for (const guild of readyClient.guilds.cache.values()) {
     await tracker.hydrateGuild(guild);
   }
+
   console.log(`Logged in as ${readyClient.user.tag}`);
 });
 
@@ -903,6 +975,37 @@ client.on(Events.InteractionCreate, async interaction => {
       console.error('Autocomplete error:', error);
       try {
         await interaction.respond([]);
+      } catch {}
+    }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu()) {
+    try {
+      if (typeof tracker.handleSelectMenu === 'function') {
+        await interaction.deferUpdate();
+        await tracker.handleSelectMenu(interaction);
+        return;
+      }
+
+      await interaction.reply({
+        content: 'That stats menu is not available yet.',
+        ephemeral: true,
+      });
+    } catch (error) {
+      console.error('Select menu error:', error);
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({
+            content: 'Could not update that panel.',
+            ephemeral: true,
+          });
+        } else {
+          await interaction.followUp({
+            content: 'Could not update that panel.',
+            ephemeral: true,
+          });
+        }
       } catch {}
     }
     return;
@@ -939,12 +1042,18 @@ client.on(Events.InteractionCreate, async interaction => {
 
   try {
     if (interaction.commandName === 'ping') {
-      await interaction.reply('Pong!');
+      const embed = createBaseEmbed({
+        color: BRAND.success,
+        title: 'Pong',
+        description: `Bot is online.\nAPI latency: **${Math.round(client.ws.ping)}ms**`,
+      });
+
+      await interaction.reply({ embeds: [embed] });
       return;
     }
 
     if (interaction.commandName === 'route') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Finding the highest-value route for your ship…'));
 
       const response = await buildRouteResponse({
         shipName: interaction.options.getString('ship', true),
@@ -963,14 +1072,14 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'best-routes') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Ranking the best routes by cargo bracket…'));
       await ensureShipData(false);
 
       const shipName = interaction.options.getString('ship', true);
       const ship = getShipProfile(shipName);
 
       if (!ship) {
-        await interaction.editReply({ content: 'Invalid ship.' });
+        await interaction.editReply(buildErrorReply('Invalid ship.'));
         return;
       }
 
@@ -995,73 +1104,74 @@ client.on(Events.InteractionCreate, async interaction => {
         lines.push(
           `**${bracket.name}** — ${result.route.commodity}\n` +
           `${result.route.buyShortGroup} → ${result.route.sellShortGroup}\n` +
-          `${result.route.totalProfit.toLocaleString()} aUEC | ROI ${result.route.profitPercent.toFixed(1)}% | ${result.route.time.label}`
+          `${formatNumber(result.route.totalProfit)} aUEC profit • ROI ${result.route.profitPercent.toFixed(1)}% • ${result.route.time.label}`
         );
       }
 
-      const embed = new EmbedBuilder()
-        .setColor(0x38bdf8)
-        .setTitle(`Best routes by cargo bracket for ${ship.name}`)
-        .setDescription(lines.join('\n\n'))
-        .setThumbnail(EMBED_THUMBNAIL_URL)
-        .setImage(EMBED_BANNER_URL)
-        .addFields(
-          { name: 'Start', value: locationInput || 'Any', inline: true },
-          { name: 'Finish', value: finishInput || 'Any', inline: true },
-          { name: 'Ship Cargo', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
-        )
-        .setFooter({
-          text: `SPACEWHLE Trade Command • bracket summary • ${getShipSourceLabel()}`,
-        });
+      const embed = createTradeEmbed({
+        color: BRAND.info,
+        title: `Best Routes by Cargo Bracket • ${ship.name}`,
+        description: lines.join('\n\n'),
+      }).addFields(
+        { name: 'Start', value: locationInput || 'Any', inline: true },
+        { name: 'Finish', value: finishInput || 'Any', inline: true },
+        { name: 'Ship Cargo', value: `${formatNumber(ship.cargo)} SCU`, inline: true },
+      );
+
+      embed.setFooter({
+        text: `${BRAND.name} Trade Command • bracket summary • ${getShipSourceLabel()}`,
+      });
 
       await interaction.editReply({ embeds: [embed] });
       return;
     }
 
     if (interaction.commandName === 'location') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Loading grouped terminal data…'));
       await loadMarketData(false);
 
       const locationInput = interaction.options.getString('location', true);
       const group = findMatchingGroup(locationInput);
 
       if (!group) {
-        await interaction.editReply({ content: 'I could not find that location.' });
+        await interaction.editReply(buildErrorReply('I could not find that location.'));
         return;
       }
 
-      const embed = new EmbedBuilder()
-        .setColor(0x60a5fa)
-        .setTitle(group.shortName)
-        .setDescription(`Type: **${group.locationType}** | System: **${group.system}**`)
-        .setThumbnail(EMBED_THUMBNAIL_URL)
-        .setImage(EMBED_BANNER_URL)
-        .addFields(
-          {
-            name: `Commodity Shops (${group.terminals.length})`,
-            value: group.terminals.map(t => `• ${t.name}`).join('\n').slice(0, 1024) || 'None',
-            inline: false,
-          },
-          {
-            name: 'Sells by Shop',
-            value: formatSellListByTerminal(group.terminals).slice(0, 1024),
-            inline: false,
-          },
-          {
-            name: 'Buys by Shop',
-            value: formatBuyListByTerminal(group.terminals).slice(0, 1024),
-            inline: false,
-          },
-        )
-        .setFooter({
-          text: 'SPACEWHLE Trade Command • grouped location view',
-        });
+      const shops = group.terminals.map(t => `• ${t.name}`).join('\n') || 'None';
+
+      const embed = createTradeEmbed({
+        color: 0x60a5fa,
+        title: group.shortName,
+        description: `**${group.locationType}** • **${group.system}**`,
+      }).addFields(
+        {
+          name: `Commodity Shops (${group.terminals.length})`,
+          value: truncate(shops, 1024),
+          inline: false,
+        },
+        {
+          name: 'Sells by Shop',
+          value: truncate(formatSellListByTerminal(group.terminals), 1024),
+          inline: false,
+        },
+        {
+          name: 'Buys by Shop',
+          value: truncate(formatBuyListByTerminal(group.terminals), 1024),
+          inline: false,
+        },
+      );
+
+      embed.setFooter({
+        text: `${BRAND.name} Trade Command • grouped location view`,
+      });
 
       await interaction.editReply({ embeds: [embed] });
       return;
     }
-        if (interaction.commandName === 'buyers') {
-      await interaction.deferReply();
+
+    if (interaction.commandName === 'buyers') {
+      await interaction.reply(buildLoadingReply('Finding the strongest buyers…'));
       await loadMarketData(false);
 
       const commodityInput = interaction.options.getString('commodity', true);
@@ -1087,77 +1197,79 @@ client.on(Events.InteractionCreate, async interaction => {
         .slice(0, 5);
 
       if (!buyers.length) {
-        await interaction.editReply({ content: 'No buyers found for that commodity and location filter.' });
+        await interaction.editReply(buildErrorReply('No buyers found for that commodity and location filter.'));
         return;
       }
 
       const lines = buyers.map((buyer, index) => {
         const extra = amountInput
-          ? ` | Sellable: ${buyer.sellableAmount ?? amountInput} SCU | Total: ${(buyer.totalValue || 0).toLocaleString()} aUEC`
+          ? ` | Sellable: ${buyer.sellableAmount ?? amountInput} SCU | Total: ${formatNumber(buyer.totalValue || 0)} aUEC`
           : ` | Demand: ${buyer.demand || 'Unknown'} SCU`;
 
-        return `**${index + 1}. ${buyer.shortGroupName}**\n${buyer.terminalName}\n${buyer.price.toLocaleString()} aUEC / SCU${extra}`;
+        return `**${index + 1}. ${buyer.shortGroupName}**\n${buyer.terminalName}\n${formatNumber(buyer.price)} aUEC / SCU${extra}`;
       }).join('\n\n');
 
-      const embed = new EmbedBuilder()
-        .setColor(0xf59e0b)
-        .setTitle(`Best buyers for ${commodityInput}`)
-        .setDescription(lines)
-        .setThumbnail(EMBED_THUMBNAIL_URL)
-        .setImage(EMBED_BANNER_URL)
-        .addFields(
-          { name: 'Commodity', value: commodityInput, inline: true },
-          { name: 'Amount', value: amountInput ? `${amountInput.toLocaleString()} SCU` : 'Not set', inline: true },
-          { name: 'Location Filter', value: locationInput || 'None', inline: true },
-        )
-        .setFooter({
-          text: 'SPACEWHLE Trade Command • top 5 buyers',
-        });
+      const embed = createTradeEmbed({
+        color: BRAND.warning,
+        title: `Best Buyers • ${commodityInput}`,
+        description: lines,
+      }).addFields(
+        { name: 'Commodity', value: commodityInput, inline: true },
+        { name: 'Amount', value: amountInput ? `${formatNumber(amountInput)} SCU` : 'Not set', inline: true },
+        { name: 'Location Filter', value: locationInput || 'None', inline: true },
+      );
+
+      embed.setFooter({
+        text: `${BRAND.name} Trade Command • top 5 buyers`,
+      });
 
       await interaction.editReply({ embeds: [embed] });
       return;
     }
 
     if (interaction.commandName === 'players') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Loading live player tracking…'));
       await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
       return;
     }
 
     if (interaction.commandName === 'top') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Loading statboard…'));
       await interaction.editReply(tracker.buildTopEmbed(7));
       return;
     }
 
     if (interaction.commandName === 'stats') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Loading member stat profile…'));
       const user = interaction.options.getUser('user', true);
       await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
       return;
     }
 
     if (interaction.commandName === 'ship') {
-      await interaction.deferReply();
+      await interaction.reply(buildLoadingReply('Loading ship profile…'));
       await ensureShipData(false);
+
       const shipName = interaction.options.getString('ship', true);
       const ship = getShipProfile(shipName);
+
       if (!ship) {
-        await interaction.editReply({ content: 'I could not find that ship.' });
+        await interaction.editReply(buildErrorReply('I could not find that ship.'));
         return;
       }
 
-      const embed = new EmbedBuilder()
-        .setColor(0x8b5cf6)
-        .setTitle(ship.name)
-        .setThumbnail(EMBED_THUMBNAIL_URL)
-        .addFields(
-          { name: 'Cargo capacity', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
-          { name: 'Military hull', value: ship.military ? 'Yes' : 'No', inline: true },
-          { name: 'Cargo tier', value: ship.cargoTier, inline: true },
-          { name: 'Ship data source', value: getShipSourceLabel(), inline: false },
-        )
-        .setFooter({ text: 'Live pull attempted first, then fallback ship data.' });
+      const embed = createBaseEmbed({
+        color: BRAND.purple,
+        title: ship.name,
+        description: 'Ship profile and cargo details',
+      }).addFields(
+        { name: 'Cargo capacity', value: `${formatNumber(ship.cargo)} SCU`, inline: true },
+        { name: 'Military hull', value: ship.military ? 'Yes' : 'No', inline: true },
+        { name: 'Cargo tier', value: ship.cargoTier, inline: true },
+        { name: 'Ship data source', value: getShipSourceLabel(), inline: false },
+      );
+
+      embed.setFooter({ text: 'Live ship pull attempted first, then local fallback data.' });
 
       await interaction.editReply({ embeds: [embed] });
       return;
@@ -1167,11 +1279,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({
-          content: 'Something went wrong.',
-          embeds: [],
-          components: [],
-        });
+        await interaction.editReply(buildErrorReply('Something went wrong while processing that command.'));
       } else {
         await interaction.reply({
           content: 'Something went wrong.',
