@@ -6,7 +6,6 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
-  StringSelectMenuBuilder,
 } = require('discord.js');
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
@@ -16,14 +15,6 @@ const STAR_CITIZEN_MATCH = /star\s*citizen/i;
 const THUMBNAIL_URL = 'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
 const TRACKED_ROLE_NAME = (process.env.TRACKED_ROLE_NAME || 'SPACEWHLE').replace(/^@/, '').trim();
 const TRACKED_ROLE_ID = process.env.TRACKED_ROLE_ID || null;
-
-const COLORS = {
-  brand: 0x5865f2,
-  messages: 0x60a5fa,
-  voice: 0x34d399,
-  playtime: 0xf59e0b,
-  panel: 0x0f172a,
-};
 
 function safeReadJson(filePath, fallback) {
   try {
@@ -55,6 +46,25 @@ function formatDisplayDate(dayKey) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
+function formatHours(seconds) {
+  return `${(Number(seconds || 0) / 3600).toFixed(1)}h`;
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString('en-GB');
+}
+
+function formatSessionLength(startedAt) {
+  if (!startedAt) return '—';
+  return formatHours(Math.max(0, Math.floor((now() - startedAt) / 1000)));
+}
+
+function clampFieldText(text, fallback = 'No data yet.') {
+  const value = String(text || '').trim();
+  if (!value) return fallback;
+  return value.length > 1024 ? `${value.slice(0, 1021)}…` : value;
+}
+
 function createDailyStatMap() {
   return {};
 }
@@ -68,18 +78,43 @@ function cleanupDailyMap(map) {
   }
 }
 
-function formatNumber(value) {
-  return Number(value || 0).toLocaleString('en-GB');
+function createEmptyUser(userId, username = 'Unknown User') {
+  return {
+    userId,
+    username,
+    messages: createDailyStatMap(),
+    voiceSeconds: createDailyStatMap(),
+    starCitizenSeconds: createDailyStatMap(),
+    totals: {
+      messages: 0,
+      voiceSeconds: 0,
+      starCitizenSeconds: 0,
+    },
+    current: {
+      voiceStartedAt: null,
+      voiceChannelId: null,
+      starCitizenStartedAt: null,
+      tracked: false,
+    },
+  };
 }
 
-function formatHours(seconds) {
-  return `${(Number(seconds || 0) / 3600).toFixed(1)}h`;
+function createEmptyTextChannel(channelId, name = 'Unknown Channel') {
+  return {
+    channelId,
+    name,
+    messages: createDailyStatMap(),
+    totals: { messages: 0 },
+  };
 }
 
-function clampFieldText(text, fallback = 'No data yet.') {
-  const value = String(text || '').trim();
-  if (!value) return fallback;
-  return value.length > 1024 ? `${value.slice(0, 1021)}…` : value;
+function createEmptyVoiceChannel(channelId, name = 'Unknown Voice') {
+  return {
+    channelId,
+    name,
+    voiceSeconds: createDailyStatMap(),
+    totals: { voiceSeconds: 0 },
+  };
 }
 
 function parseLegacyDays(customId, fallback = 7) {
@@ -121,73 +156,6 @@ function decodeStatsButton(customId) {
   return null;
 }
 
-function createEmptyUser(userId, username = 'Unknown User') {
-  return {
-    userId,
-    username,
-    messages: createDailyStatMap(),
-    voiceSeconds: createDailyStatMap(),
-    starCitizenSeconds: createDailyStatMap(),
-    totals: {
-      messages: 0,
-      voiceSeconds: 0,
-      starCitizenSeconds: 0,
-    },
-    current: {
-      voiceStartedAt: null,
-      voiceChannelId: null,
-      starCitizenStartedAt: null,
-      tracked: false,
-    },
-  };
-}
-
-function createEmptyTextChannel(channelId, name = 'Unknown Channel') {
-  return {
-    channelId,
-    name,
-    messages: createDailyStatMap(),
-    totals: {
-      messages: 0,
-    },
-  };
-}
-
-function createEmptyVoiceChannel(channelId, name = 'Unknown Voice') {
-  return {
-    channelId,
-    name,
-    voiceSeconds: createDailyStatMap(),
-    totals: {
-      voiceSeconds: 0,
-    },
-  };
-}
-
-function makeBars(values, {
-  width = 12,
-  empty = '▱',
-  full = '▰',
-  formatter = value => String(value),
-} = {}) {
-  const clean = values.map(v => Number(v || 0));
-  const max = Math.max(...clean, 0);
-
-  if (max <= 0) {
-    return clean.map(value => `${empty.repeat(width)} ${formatter(value)}`);
-  }
-
-  return clean.map(value => {
-    const filled = Math.max(0, Math.round((value / max) * width));
-    return `${full.repeat(filled)}${empty.repeat(Math.max(0, width - filled))} ${formatter(value)}`;
-  });
-}
-
-function formatSessionLength(startedAt) {
-  if (!startedAt) return '—';
-  return formatHours(Math.max(0, Math.floor((now() - startedAt) / 1000)));
-}
-
 class StatsTracker {
   constructor(client) {
     this.client = client;
@@ -225,7 +193,6 @@ class StatsTracker {
 
         const username = message.member?.displayName || message.author?.username || 'Unknown User';
         const channelName = message.channel?.name || message.channel?.id || 'unknown-channel';
-
         this.incrementMessage(message.author.id, username, message.channel.id, channelName);
       } catch (error) {
         console.error('messageCreate tracker error:', error);
@@ -335,7 +302,7 @@ class StatsTracker {
               newMember.id,
               username,
               newMember.voice.channelId,
-              newMember.voice.channel?.name || newMember.voice.channelId
+              newMember.voice.channel?.name || newMember.voice.channelId,
             );
           }
 
@@ -359,10 +326,7 @@ class StatsTracker {
 
   memberHasTrackedRole(member) {
     if (!member || !member.roles?.cache) return false;
-
-    if (TRACKED_ROLE_ID) {
-      return member.roles.cache.has(TRACKED_ROLE_ID);
-    }
+    if (TRACKED_ROLE_ID) return member.roles.cache.has(TRACKED_ROLE_ID);
 
     const target = TRACKED_ROLE_NAME.toLowerCase();
     return member.roles.cache.some(role => String(role.name || '').trim().toLowerCase() === target);
@@ -390,7 +354,7 @@ class StatsTracker {
           member.id,
           username,
           member.voice.channelId,
-          member.voice.channel?.name || member.voice.channelId
+          member.voice.channel?.name || member.voice.channelId,
         );
       }
 
@@ -407,7 +371,7 @@ class StatsTracker {
     const activities = presence?.activities || [];
     return activities.some(activity =>
       STAR_CITIZEN_MATCH.test(activity?.name || '') ||
-      STAR_CITIZEN_MATCH.test(activity?.details || '')
+      STAR_CITIZEN_MATCH.test(activity?.details || ''),
     );
   }
 
@@ -475,7 +439,6 @@ class StatsTracker {
     const user = this.getUser(userId, username);
     user[mapKey][dayKey] = (user[mapKey][dayKey] || 0) + seconds;
     user.totals[totalsKey] += seconds;
-
     this.scheduleSave();
   }
 
@@ -487,7 +450,6 @@ class StatsTracker {
 
     voiceChannel.voiceSeconds[dayKey] = (voiceChannel.voiceSeconds[dayKey] || 0) + seconds;
     voiceChannel.totals.voiceSeconds += seconds;
-
     this.scheduleSave();
   }
 
@@ -646,11 +608,9 @@ class StatsTracker {
 
   getRangeDayKeys(days = 7) {
     const keys = [];
-
     for (let i = days - 1; i >= 0; i -= 1) {
       keys.push(getDayKey(now() - i * ONE_DAY_MS));
     }
-
     return keys;
   }
 
@@ -693,40 +653,13 @@ class StatsTracker {
       .filter(row => row.messages > 0 || row.voiceSeconds > 0 || row.starCitizenSeconds > 0);
 
     return {
-      messages: [...rows].sort((a, b) => b.messages - a.messages).slice(0, 10),
-      voice: [...rows].sort((a, b) => b.voiceSeconds - a.voiceSeconds).slice(0, 10),
-      starCitizen: [...rows].sort((a, b) => b.starCitizenSeconds - a.starCitizenSeconds).slice(0, 10),
+      all: rows,
+      messages: [...rows].sort((a, b) => b.messages - a.messages),
+      voice: [...rows].sort((a, b) => b.voiceSeconds - a.voiceSeconds),
+      starCitizen: [...rows].sort((a, b) => b.starCitizenSeconds - a.starCitizenSeconds),
       dayKeys,
       trackedUsers,
     };
-  }
-
-  getTextChannelLeaderboard(days = 7) {
-    const dayKeys = this.getRangeDayKeys(days);
-
-    return Object.values(this.state.textChannels || {})
-      .map(channel => ({
-        channelId: channel.channelId,
-        name: channel.name,
-        messages: this.sumMap(channel.messages, dayKeys),
-      }))
-      .filter(row => row.messages > 0)
-      .sort((a, b) => b.messages - a.messages)
-      .slice(0, 10);
-  }
-
-  getVoiceChannelLeaderboard(days = 7) {
-    const dayKeys = this.getRangeDayKeys(days);
-
-    return Object.values(this.state.voiceChannels || {})
-      .map(channel => ({
-        channelId: channel.channelId,
-        name: channel.name,
-        voiceSeconds: this.sumMap(channel.voiceSeconds, dayKeys),
-      }))
-      .filter(row => row.voiceSeconds > 0)
-      .sort((a, b) => b.voiceSeconds - a.voiceSeconds)
-      .slice(0, 10);
   }
 
   getUserStats(userId, days = 7) {
@@ -757,11 +690,21 @@ class StatsTracker {
     };
   }
 
+  getUserRankings(userId, days) {
+    const board = this.getLeaderboard(days);
+    return {
+      messages: board.messages.findIndex(row => row.userId === userId) + 1,
+      voice: board.voice.findIndex(row => row.userId === userId) + 1,
+      starCitizen: board.starCitizen.findIndex(row => row.userId === userId) + 1,
+      totalTracked: board.all.length,
+      board,
+    };
+  }
+
   getCurrentPlayers(guild) {
     if (!guild) return { count: 0, players: [] };
 
     const players = [];
-
     for (const member of guild.members.cache.values()) {
       if (member.user?.bot) continue;
       if (!this.memberHasTrackedRole(member)) continue;
@@ -791,94 +734,6 @@ class StatsTracker {
     return best;
   }
 
-  formatLeaderboardRows(rows, type) {
-    if (!rows.length) return 'No data yet.';
-
-    return rows.map((row, index) => {
-      let value = '0';
-      if (type === 'messages') value = `${formatNumber(row.messages)} msgs`;
-      if (type === 'voice') value = formatHours(row.voiceSeconds);
-      if (type === 'starCitizen') value = formatHours(row.starCitizenSeconds);
-      return `**${index + 1}.** ${row.username} — ${value}`;
-    }).join('\n');
-  }
-
-  formatTextChannelRows(rows) {
-    if (!rows.length) return 'No data yet.';
-
-    return rows.map((row, index) => {
-      const mention = row.channelId ? `<#${row.channelId}>` : row.name;
-      return `**${index + 1}.** ${mention} — ${formatNumber(row.messages)} msgs`;
-    }).join('\n');
-  }
-
-  formatVoiceChannelRows(rows) {
-    if (!rows.length) return 'No data yet.';
-
-    return rows.map((row, index) => {
-      const mention = row.channelId ? `<#${row.channelId}>` : row.name;
-      return `**${index + 1}.** ${mention} — ${formatHours(row.voiceSeconds)}`;
-    }).join('\n');
-  }
-
-  buildMiniChartEmbed(title, color, labels, values, formatter, description) {
-    const bars = makeBars(values, { formatter });
-    const lines = labels.map((label, index) => `\`${label.padEnd(6, ' ')}\` ${bars[index]}`);
-    const chunk = clampFieldText(lines.join('\n'), 'No data yet.');
-
-    return new EmbedBuilder()
-      .setColor(color)
-      .setTitle(title)
-      .setDescription(description)
-      .setThumbnail(THUMBNAIL_URL)
-      .addFields({
-        name: 'Trend',
-        value: `\`\`\`\n${chunk}\n\`\`\``,
-        inline: false,
-      })
-      .setFooter({ text: 'SPACEWHLE • smooth stat panel' });
-  }
-
-  buildTopSelectRow(days = 7, category = 'overview') {
-    return new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`stats:view:top:global:${days}`)
-        .setPlaceholder('Switch leaderboard view')
-        .addOptions([
-          {
-            label: 'Overview',
-            value: 'overview',
-            description: 'Full statboard summary',
-            default: category === 'overview',
-          },
-          {
-            label: 'Messages',
-            value: 'messages',
-            description: 'Message leaderboard focus',
-            default: category === 'messages',
-          },
-          {
-            label: 'Voice',
-            value: 'voice',
-            description: 'Voice leaderboard focus',
-            default: category === 'voice',
-          },
-          {
-            label: 'Playtime',
-            value: 'starCitizen',
-            description: 'Star Citizen playtime focus',
-            default: category === 'starCitizen',
-          },
-          {
-            label: 'Channels',
-            value: 'channels',
-            description: 'Top text and voice channels',
-            default: category === 'channels',
-          },
-        ])
-    );
-  }
-
   buildStatsControlRow(panel, targetId, days, category = 'overview', showTime = false) {
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -900,130 +755,115 @@ class StatsTracker {
         new ButtonBuilder()
           .setCustomId(encodeStatsButton('range', panel, targetId, range, category, showTime))
           .setLabel(`${range}d`)
-          .setStyle(range === days ? ButtonStyle.Primary : ButtonStyle.Secondary)
-      )
+          .setStyle(range === days ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      ),
     );
+  }
+
+  buildDualAxisChartUrl({ labels, messages, voiceHours, playtimeHours }) {
+    const config = {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Messages', data: messages, borderColor: '#60a5fa', yAxisID: 'y1', fill: false, tension: 0.3 },
+          { label: 'VC Hours', data: voiceHours, borderColor: '#34d399', yAxisID: 'y', fill: false, tension: 0.3 },
+          { label: 'SC Hours', data: playtimeHours, borderColor: '#f59e0b', yAxisID: 'y', fill: false, tension: 0.3 },
+        ],
+      },
+      options: {
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, position: 'left', title: { display: true, text: 'Hours' } },
+          y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Messages' } },
+        },
+      },
+    };
+
+    return `https://quickchart.io/chart?width=1000&height=400&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+  }
+
+  buildPlayersChartUrl({ labels, players }) {
+    const config = {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Peak Players', data: players, borderColor: '#a78bfa', fill: false, tension: 0.3 },
+        ],
+      },
+      options: {
+        plugins: { legend: { display: true } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, title: { display: true, text: 'Players' } },
+        },
+      },
+    };
+
+    return `https://quickchart.io/chart?width=1000&height=400&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+  }
+
+  formatTopThree(rows, type) {
+    const top = rows.slice(0, 3);
+    if (!top.length) return '```\nNo data yet.\n```';
+
+    const lines = top.map((row, index) => {
+      let value = '0';
+      if (type === 'messages') value = formatNumber(row.messages);
+      if (type === 'voice') value = formatHours(row.voiceSeconds);
+      if (type === 'starCitizen') value = formatHours(row.starCitizenSeconds);
+      return `${index + 1}. ${row.username} | ${value}`;
+    });
+
+    return `\`\`\`\n${clampFieldText(lines.join('\n'))}\n\`\`\``;
+  }
+
+  buildBaseEmbed(title) {
+    return new EmbedBuilder().setColor(0x5865f2).setTitle(title).setThumbnail(THUMBNAIL_URL);
   }
 
   buildTopEmbed(days = 7, category = 'overview', showTime = false) {
     const board = this.getLeaderboard(days);
-    const textChannels = this.getTextChannelLeaderboard(days);
-    const voiceChannels = this.getVoiceChannelLeaderboard(days);
     const labels = board.dayKeys.map(formatDisplayDate);
 
     const messagesSeries = board.dayKeys.map(dayKey =>
-      board.trackedUsers.reduce((sum, user) => sum + Number(user.messages?.[dayKey] || 0), 0)
+      board.trackedUsers.reduce((sum, user) => sum + Number(user.messages?.[dayKey] || 0), 0),
     );
-
     const voiceSeries = board.dayKeys.map(dayKey =>
-      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.voiceSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2))
+      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.voiceSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2)),
     );
-
     const playtimeSeries = board.dayKeys.map(dayKey =>
-      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.starCitizenSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2))
+      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.starCitizenSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2)),
     );
 
-    const summaryEmbed = new EmbedBuilder()
-      .setColor(COLORS.brand)
-      .setTitle(`SPACEWHLE Statboard · Last ${days} Day${days === 1 ? '' : 's'}`)
-      .setDescription(`Tracking **@${TRACKED_ROLE_NAME}** members only.`)
-      .setThumbnail(THUMBNAIL_URL)
+    const totalMessages = messagesSeries.reduce((sum, value) => sum + value, 0);
+    const totalVoiceHours = voiceSeries.reduce((sum, value) => sum + value, 0);
+    const totalPlaytimeHours = playtimeSeries.reduce((sum, value) => sum + value, 0);
+
+    const embed = this.buildBaseEmbed(`Server Stats · Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setImage(this.buildDualAxisChartUrl({
+        labels,
+        messages: messagesSeries,
+        voiceHours: voiceSeries,
+        playtimeHours: playtimeSeries,
+      }))
       .addFields(
-        { name: 'Tracked members', value: formatNumber(board.trackedUsers.length), inline: true },
-        { name: 'Window', value: `${days} day${days === 1 ? '' : 's'}`, inline: true },
-        { name: 'View', value: category === 'starCitizen' ? 'Playtime' : `${category.charAt(0).toUpperCase()}${category.slice(1)}`, inline: true },
-      )
-      .setFooter({ text: 'SPACEWHLE • premium statboard' });
-
-    if (category === 'messages') {
-      summaryEmbed.addFields({
-        name: 'Top message senders',
-        value: clampFieldText(this.formatLeaderboardRows(board.messages, 'messages')),
-        inline: false,
-      });
-    } else if (category === 'voice') {
-      summaryEmbed.addFields({
-        name: 'Top voice members',
-        value: clampFieldText(this.formatLeaderboardRows(board.voice, 'voice')),
-        inline: false,
-      });
-    } else if (category === 'starCitizen') {
-      summaryEmbed.addFields({
-        name: 'Top playtime members',
-        value: clampFieldText(this.formatLeaderboardRows(board.starCitizen, 'starCitizen')),
-        inline: false,
-      });
-    } else if (category === 'channels') {
-      summaryEmbed.addFields(
         {
-          name: 'Top text channels',
-          value: clampFieldText(this.formatTextChannelRows(textChannels)),
-          inline: true,
+          name: 'Overview',
+          value: `\`\`\`\nMembers   | ${formatNumber(board.trackedUsers.length)}\nMessages  | ${formatNumber(totalMessages)}\nVC Hours  | ${totalVoiceHours.toFixed(1)}h\nSC Hours  | ${totalPlaytimeHours.toFixed(1)}h\n\`\`\``,
+          inline: false,
         },
-        {
-          name: 'Top voice channels',
-          value: clampFieldText(this.formatVoiceChannelRows(voiceChannels)),
-          inline: true,
-        }
+        { name: 'Top Messages', value: this.formatTopThree(board.messages, 'messages'), inline: true },
+        { name: 'Top VC Hours', value: this.formatTopThree(board.voice, 'voice'), inline: true },
+        { name: 'Top SC Hours', value: this.formatTopThree(board.starCitizen, 'starCitizen'), inline: true },
       );
-    } else {
-      summaryEmbed.addFields(
-        {
-          name: 'Top messages',
-          value: clampFieldText(this.formatLeaderboardRows(board.messages, 'messages')),
-          inline: true,
-        },
-        {
-          name: 'Top voice',
-          value: clampFieldText(this.formatLeaderboardRows(board.voice, 'voice')),
-          inline: true,
-        },
-        {
-          name: 'Top playtime',
-          value: clampFieldText(this.formatLeaderboardRows(board.starCitizen, 'starCitizen')),
-          inline: true,
-        }
-      );
-    }
 
-    const embeds = [
-      summaryEmbed,
-      this.buildMiniChartEmbed(
-        'Messages Trend',
-        COLORS.messages,
-        labels,
-        messagesSeries,
-        value => `${Math.round(value)}`,
-        'Daily message activity'
-      ),
-      this.buildMiniChartEmbed(
-        'Voice Hours Trend',
-        COLORS.voice,
-        labels,
-        voiceSeries,
-        value => `${Number(value).toFixed(1)}h`,
-        'Daily voice activity'
-      ),
-      this.buildMiniChartEmbed(
-        'Playtime Hours Trend',
-        COLORS.playtime,
-        labels,
-        playtimeSeries,
-        value => `${Number(value).toFixed(1)}h`,
-        'Daily Star Citizen activity'
-      ),
-    ];
+    const components = [this.buildStatsControlRow('top', 'global', days, category, showTime)];
+    if (showTime) components.push(this.buildRangeButtons('top', 'global', days, category, true));
 
-    const components = [
-      this.buildTopSelectRow(days, category),
-      this.buildStatsControlRow('top', 'global', days, category, showTime),
-    ];
-
-    if (showTime) {
-      components.push(this.buildRangeButtons('top', 'global', days, category, true));
-    }
-
-    return { embeds, components };
+    return { embeds: [embed], components };
   }
 
   buildUserStatsEmbed(userId, days = 7, showTime = false) {
@@ -1032,140 +872,82 @@ class StatsTracker {
 
     if (!stats || !memberStillTracked) {
       const components = [this.buildStatsControlRow('user', userId, days, 'overview', showTime)];
-      if (showTime) {
-        components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
-      }
-
+      if (showTime) components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
       return {
-        content: 'No tracked SPACEWHLE data for that user yet.',
+        content: 'No tracked data for that user yet.',
         embeds: [],
         components,
       };
     }
 
+    const rankings = this.getUserRankings(userId, days);
     const labels = stats.daily.map(day => day.label);
     const messageValues = stats.daily.map(day => day.messages);
     const voiceValues = stats.daily.map(day => day.voiceHours);
     const playtimeValues = stats.daily.map(day => day.starCitizenHours);
 
-    const summaryEmbed = new EmbedBuilder()
-      .setColor(COLORS.brand)
-      .setTitle(`${stats.username} · Stat Profile`)
-      .setDescription(`Tracking **@${TRACKED_ROLE_NAME}** activity only.`)
-      .setThumbnail(THUMBNAIL_URL)
+    const embed = this.buildBaseEmbed(`${stats.username} · Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setImage(this.buildDualAxisChartUrl({
+        labels,
+        messages: messageValues,
+        voiceHours: voiceValues,
+        playtimeHours: playtimeValues,
+      }))
       .addFields(
-        { name: 'Messages', value: formatNumber(stats.totals.messages), inline: true },
-        { name: 'Voice hours', value: formatHours(stats.totals.voiceSeconds), inline: true },
-        { name: 'Playtime hours', value: formatHours(stats.totals.starCitizenSeconds), inline: true },
-        { name: 'Current voice session', value: formatSessionLength(stats.current.voiceStartedAt), inline: true },
-        { name: 'Current SC session', value: formatSessionLength(stats.current.starCitizenStartedAt), inline: true },
-        { name: 'Window', value: `${days} day${days === 1 ? '' : 's'}`, inline: true },
-      )
-      .setFooter({ text: 'SPACEWHLE • live profile tracking' });
+        {
+          name: 'Summary',
+          value: `\`\`\`\nMessages  | ${formatNumber(stats.totals.messages)}\nVC Hours  | ${(stats.totals.voiceSeconds / 3600).toFixed(1)}h\nSC Hours  | ${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h\nVC Live   | ${formatSessionLength(stats.current.voiceStartedAt)}\nSC Live   | ${formatSessionLength(stats.current.starCitizenStartedAt)}\n\`\`\``,
+          inline: false,
+        },
+        {
+          name: 'Rank',
+          value: `\`\`\`\nMessages  | #${rankings.messages || '-'}\nVC Hours  | #${rankings.voice || '-'}\nSC Hours  | #${rankings.starCitizen || '-'}\nTracked   | ${formatNumber(rankings.totalTracked)}\n\`\`\``,
+          inline: true,
+        },
+        { name: 'Top Messages', value: this.formatTopThree(rankings.board.messages, 'messages'), inline: true },
+        { name: 'Top VC Hours', value: this.formatTopThree(rankings.board.voice, 'voice'), inline: true },
+        { name: 'Top SC Hours', value: this.formatTopThree(rankings.board.starCitizen, 'starCitizen'), inline: true },
+      );
 
-    const embeds = [
-      summaryEmbed,
-      this.buildMiniChartEmbed(
-        `${stats.username} · Messages`,
-        COLORS.messages,
-        labels,
-        messageValues,
-        value => `${Math.round(value)}`,
-        'Daily messages'
-      ),
-      this.buildMiniChartEmbed(
-        `${stats.username} · Voice Hours`,
-        COLORS.voice,
-        labels,
-        voiceValues,
-        value => `${Number(value).toFixed(1)}h`,
-        'Daily voice time'
-      ),
-      this.buildMiniChartEmbed(
-        `${stats.username} · Playtime Hours`,
-        COLORS.playtime,
-        labels,
-        playtimeValues,
-        value => `${Number(value).toFixed(1)}h`,
-        'Daily Star Citizen time'
-      ),
-    ];
+    const components = [this.buildStatsControlRow('user', userId, days, 'overview', showTime)];
+    if (showTime) components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
 
-    const components = [
-      this.buildStatsControlRow('user', userId, days, 'overview', showTime),
-    ];
-
-    if (showTime) {
-      components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
-    }
-
-    return { embeds, components };
+    return { embeds: [embed], components };
   }
 
   buildPlayersEmbed(guild, days = 7, showTime = false) {
     const current = this.getCurrentPlayers(guild);
     const peak = this.getPeakForRange(days);
     const dayKeys = this.getRangeDayKeys(days);
-
-    const peakSeries = dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0));
     const labels = dayKeys.map(formatDisplayDate);
+    const playerSeries = dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0));
 
-    const currentLines = current.players.length
-      ? current.players.slice(0, 15).map(player => {
-          const extra = player.startedAt ? ` · ${formatSessionLength(player.startedAt)} session` : '';
-          return `• ${player.name}${extra}`;
-        }).join('\n')
-      : 'Nobody currently detected in Star Citizen.';
+    const currentTable = current.players.length
+      ? `\`\`\`\n${current.players.slice(0, 12).map(player => `${player.name} | ${formatSessionLength(player.startedAt)}`).join('\n')}\n\`\`\``
+      : '```\nNo one currently detected in Star Citizen.\n```';
 
-    const summaryEmbed = new EmbedBuilder()
-      .setColor(COLORS.brand)
-      .setTitle('Star Citizen Player Tracker')
-      .setDescription(`Live player panel for **@${TRACKED_ROLE_NAME}**.`)
-      .setThumbnail(THUMBNAIL_URL)
+    const embed = this.buildBaseEmbed(`Players · Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setImage(this.buildPlayersChartUrl({ labels, players: playerSeries }))
       .addFields(
-        { name: 'Playing right now', value: String(current.count), inline: true },
-        { name: `Peak in last ${days}d`, value: String(peak.count || 0), inline: true },
-        { name: 'Peak time', value: peak.ts ? `<t:${Math.floor(peak.ts / 1000)}:f>` : 'No data yet', inline: true },
-        { name: 'Current players', value: clampFieldText(currentLines, 'Nobody currently detected in Star Citizen.'), inline: false },
-      )
-      .setFooter({ text: 'SPACEWHLE • presence-based SC tracking' });
+        {
+          name: 'Overview',
+          value: `\`\`\`\nLive Now   | ${current.count}\nPeak       | ${peak.count || 0}\nPeak Time  | ${peak.ts ? new Date(peak.ts).toLocaleString('en-GB') : 'No data'}\n\`\`\``,
+          inline: false,
+        },
+        {
+          name: 'Current Players',
+          value: clampFieldText(currentTable),
+          inline: false,
+        },
+      );
 
-    const trendEmbed = this.buildMiniChartEmbed(
-      'Peak Player Trend',
-      COLORS.playtime,
-      labels,
-      peakSeries,
-      value => `${Math.round(value)}`,
-      'Daily peak Star Citizen presence'
-    );
+    const components = [this.buildStatsControlRow('players', guild?.id || 'global', days, 'overview', showTime)];
+    if (showTime) components.push(this.buildRangeButtons('players', guild?.id || 'global', days, 'overview', true));
 
-    const components = [
-      this.buildStatsControlRow('players', guild?.id || 'global', days, 'overview', showTime),
-    ];
-
-    if (showTime) {
-      components.push(this.buildRangeButtons('players', guild?.id || 'global', days, 'overview', true));
-    }
-
-    return {
-      embeds: [summaryEmbed, trendEmbed],
-      components,
-    };
+    return { embeds: [embed], components };
   }
 
-  async handleSelectMenu(interaction) {
-    const parts = String(interaction.customId || '').split(':');
-
-    if (parts[0] !== 'stats' || parts[1] !== 'view') return null;
-
-    const panel = parts[2] || 'top';
-    const days = [1, 7, 14, 30].includes(Number(parts[4])) ? Number(parts[4]) : 7;
-    const selected = interaction.values?.[0] || 'overview';
-
-    if (panel === 'top') {
-      return interaction.editReply(this.buildTopEmbed(days, selected, false));
-    }
-
+  async handleSelectMenu() {
     return null;
   }
 
@@ -1174,18 +956,9 @@ class StatsTracker {
     if (!decoded) return null;
 
     if (decoded.mode === 'legacy') {
-      if (decoded.panel === 'top') {
-        return interaction.editReply(this.buildTopEmbed(decoded.days, 'overview', false));
-      }
-
-      if (decoded.panel === 'user') {
-        return interaction.editReply(this.buildUserStatsEmbed(decoded.targetId, decoded.days, false));
-      }
-
-      if (decoded.panel === 'players') {
-        return interaction.editReply(this.buildPlayersEmbed(interaction.guild, decoded.days, false));
-      }
-
+      if (decoded.panel === 'top') return interaction.editReply(this.buildTopEmbed(decoded.days, 'overview', false));
+      if (decoded.panel === 'user') return interaction.editReply(this.buildUserStatsEmbed(decoded.targetId, decoded.days, false));
+      if (decoded.panel === 'players') return interaction.editReply(this.buildPlayersEmbed(interaction.guild, decoded.days, false));
       return null;
     }
 

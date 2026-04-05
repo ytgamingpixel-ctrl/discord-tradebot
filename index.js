@@ -1,33 +1,87 @@
 require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
+
 const {
-  ActionRowBuilder,
+  Client,
+  GatewayIntentBits,
+  Events,
+  EmbedBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder,
+  ActionRowBuilder,
 } = require('discord.js');
 
-const STATE_FILE = path.join(__dirname, 'stats-state.json');
-const MAX_DAYS = 35;
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const STAR_CITIZEN_MATCH = /star\s*citizen/i;
-const THUMBNAIL_URL = 'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
-const TRACKED_ROLE_NAME = (process.env.TRACKED_ROLE_NAME || 'SPACEWHLE').replace(/^@/, '').trim();
-const TRACKED_ROLE_ID = process.env.TRACKED_ROLE_ID || null;
+const { StatsTracker } = require('./tracker');
+const {
+  ensureShipData,
+  getShipChoices,
+  getShipProfile,
+  getShipSourceLabel,
+} = require('./ship-data');
 
-const COLORS = {
-  brand: 0x5865f2,
-  messages: 'rgb(96,165,250)',
-  voice: 'rgb(52,211,153)',
-  playtime: 'rgb(245,158,11)',
-  players: 'rgb(167,139,250)',
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
+});
+
+const tracker = new StatsTracker(client);
+tracker.init();
+
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const EMBED_THUMBNAIL_URL =
+  'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
+const EMBED_BANNER_URL =
+  'https://s1.cdn.autoevolution.com/images/news/star-citizen-unveils-a-massive-space-hauler-crowdfunding-passes-400-million-175169_1.jpg';
+
+const STATE_FILE = path.join(__dirname, 'route-state.json');
+
+const cache = {
+  lastUpdated: 0,
+  groups: [],
+  shortGroupNames: [],
+  routes: [],
+  commodityNames: [],
 };
+
+const routeStates = new Map();
+const activeMessageLocks = new Set();
+
+const MONITOR_FILE = path.join(__dirname, 'monitor-state.json');
+const ALERT_GUILD_ID = process.env.ALERT_GUILD_ID || null;
+const ALERT_USER_ID = process.env.ALERT_USER_ID || null;
+let heartbeatTimer = null;
+let shuttingDown = false;
+
+function normalizeText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getArrayPayload(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.result)) return payload.result;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return [];
+}
 
 function safeReadJson(filePath, fallback) {
   try {
     if (!fs.existsSync(filePath)) return fallback;
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(raw);
   } catch {
     return fallback;
   }
@@ -37,1062 +91,1408 @@ function safeWriteJson(filePath, value) {
   try {
     fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');
   } catch (error) {
-    console.error('Failed to write tracker state:', error);
+    console.error('Failed writing state file:', error);
   }
 }
 
-function now() {
-  return Date.now();
-}
-
-function getDayKey(timestamp = now()) {
-  return new Date(timestamp).toISOString().slice(0, 10);
-}
-
-function formatDisplayDate(dayKey) {
-  const date = new Date(`${dayKey}T00:00:00.000Z`);
-  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
-}
-
-function createDailyStatMap() {
-  return {};
-}
-
-function cleanupDailyMap(map) {
-  if (!map || typeof map !== 'object') return;
-  const cutoff = new Date(now() - MAX_DAYS * ONE_DAY_MS).toISOString().slice(0, 10);
-
-  for (const key of Object.keys(map)) {
-    if (key < cutoff) delete map[key];
+function getAlertGuild(clientInstance = client) {
+  if (!clientInstance) return null;
+  if (ALERT_GUILD_ID && clientInstance.guilds.cache.has(ALERT_GUILD_ID)) {
+    return clientInstance.guilds.cache.get(ALERT_GUILD_ID);
   }
+  return clientInstance.guilds.cache.first() || null;
 }
 
-function formatNumber(value) {
-  return Number(value || 0).toLocaleString('en-GB');
-}
+async function getAlertUser(clientInstance = client) {
+  if (!clientInstance?.isReady?.()) return null;
 
-function formatHours(seconds) {
-  return `${(Number(seconds || 0) / 3600).toFixed(1)}h`;
-}
-
-function formatSessionLength(startedAt) {
-  if (!startedAt) return '—';
-  return formatHours(Math.max(0, Math.floor((now() - startedAt) / 1000)));
-}
-
-function clampFieldText(text, fallback = 'No data yet.') {
-  const value = String(text || '').trim();
-  if (!value) return fallback;
-  return value.length > 1024 ? `${value.slice(0, 1021)}…` : value;
-}
-
-function parseLegacyDays(customId, fallback = 7) {
-  const parsed = Number(String(customId || '').split(':').pop());
-  return [1, 7, 14, 30].includes(parsed) ? parsed : fallback;
-}
-
-function encodeStatsButton(action, panel, targetId, days, category = 'overview', showTime = false) {
-  return `stats:${action}:${panel}:${targetId || 'global'}:${days}:${category}:${showTime ? 1 : 0}`;
-}
-
-function decodeStatsButton(customId) {
-  const parts = String(customId || '').split(':');
-
-  if (parts.length >= 7 && parts[0] === 'stats') {
-    return {
-      mode: 'modern',
-      action: parts[1],
-      panel: parts[2],
-      targetId: parts[3],
-      days: [1, 7, 14, 30].includes(Number(parts[4])) ? Number(parts[4]) : 7,
-      category: parts[5] || 'overview',
-      showTime: parts[6] === '1',
-    };
-  }
-
-  if (parts.length >= 4 && parts[0] === 'stats') {
-    return {
-      mode: 'legacy',
-      action: 'range',
-      panel: parts[1],
-      targetId: parts[2],
-      days: parseLegacyDays(customId, 7),
-      category: 'overview',
-      showTime: false,
-    };
-  }
-
-  return null;
-}
-
-function createEmptyUser(userId, username = 'Unknown User') {
-  return {
-    userId,
-    username,
-    messages: createDailyStatMap(),
-    voiceSeconds: createDailyStatMap(),
-    starCitizenSeconds: createDailyStatMap(),
-    totals: {
-      messages: 0,
-      voiceSeconds: 0,
-      starCitizenSeconds: 0,
-    },
-    current: {
-      voiceStartedAt: null,
-      voiceChannelId: null,
-      starCitizenStartedAt: null,
-      tracked: false,
-    },
-  };
-}
-
-function createEmptyTextChannel(channelId, name = 'Unknown Channel') {
-  return {
-    channelId,
-    name,
-    messages: createDailyStatMap(),
-    totals: {
-      messages: 0,
-    },
-  };
-}
-
-function createEmptyVoiceChannel(channelId, name = 'Unknown Voice') {
-  return {
-    channelId,
-    name,
-    voiceSeconds: createDailyStatMap(),
-    totals: {
-      voiceSeconds: 0,
-    },
-  };
-}
-
-class StatsTracker {
-  constructor(client) {
-    this.client = client;
-    this.state = safeReadJson(STATE_FILE, {
-      users: {},
-      textChannels: {},
-      voiceChannels: {},
-      concurrency: {},
-      peaks: {},
-      meta: { createdAt: now(), lastSavedAt: null },
-    });
-
-    this.state.users ??= {};
-    this.state.textChannels ??= {};
-    this.state.voiceChannels ??= {};
-    this.state.concurrency ??= {};
-    this.state.peaks ??= {};
-    this.state.meta ??= { createdAt: now(), lastSavedAt: null };
-
-    this.saveTimer = null;
-  }
-
-  init() {
-    this.cleanupState();
-    this.attachEvents();
-    setInterval(() => this.flushOpenSessions(), 60 * 1000).unref();
-    setInterval(() => this.save(), 2 * 60 * 1000).unref();
-  }
-
-  attachEvents() {
-    this.client.on('messageCreate', message => {
-      try {
-        if (!message.guild || message.author?.bot) return;
-        if (!this.memberHasTrackedRole(message.member)) return;
-
-        const username = message.member?.displayName || message.author?.username || 'Unknown User';
-        const channelName = message.channel?.name || message.channel?.id || 'unknown-channel';
-        this.incrementMessage(message.author.id, username, message.channel.id, channelName);
-      } catch (error) {
-        console.error('messageCreate tracker error:', error);
-      }
-    });
-
-    this.client.on('voiceStateUpdate', (oldState, newState) => {
-      try {
-        const member = newState.member || oldState.member;
-        if (!member || member.user?.bot) return;
-
-        const userId = member.id;
-        const username = member.displayName || member.user.username || 'Unknown User';
-        const oldChannelId = oldState.channelId || null;
-        const newChannelId = newState.channelId || null;
-        const newChannelName = newState.channel?.name || newChannelId || 'Unknown Voice';
-        const tracked = this.memberHasTrackedRole(member);
-
-        if (!tracked) {
-          this.stopVoice(userId, username);
-          this.stopStarCitizen(userId, username);
-          const user = this.getUser(userId, username);
-          user.current.tracked = false;
-          return;
-        }
-
-        const user = this.getUser(userId, username);
-        user.current.tracked = true;
-
-        if (!oldChannelId && newChannelId) {
-          this.startVoice(userId, username, newChannelId, newChannelName);
-        } else if (oldChannelId && !newChannelId) {
-          this.stopVoice(userId, username);
-        } else if (oldChannelId && newChannelId && oldChannelId !== newChannelId) {
-          this.stopVoice(userId, username);
-          this.startVoice(userId, username, newChannelId, newChannelName);
-        }
-      } catch (error) {
-        console.error('voiceStateUpdate tracker error:', error);
-      }
-    });
-
-    this.client.on('presenceUpdate', (oldPresence, newPresence) => {
-      try {
-        const presence = newPresence || oldPresence;
-        const member = presence?.member;
-        if (!member || member.user?.bot) return;
-
-        const userId = member.id;
-        const username = member.displayName || member.user.username || 'Unknown User';
-        const tracked = this.memberHasTrackedRole(member);
-
-        if (!tracked) {
-          this.stopStarCitizen(userId, username);
-          this.stopVoice(userId, username);
-          const user = this.getUser(userId, username);
-          user.current.tracked = false;
-          this.captureConcurrencySnapshot(member.guild);
-          return;
-        }
-
-        const user = this.getUser(userId, username);
-        user.current.tracked = true;
-
-        const oldPlaying = this.isPlayingStarCitizen(oldPresence);
-        const newPlaying = this.isPlayingStarCitizen(newPresence);
-
-        if (!oldPlaying && newPlaying) {
-          this.startStarCitizen(userId, username);
-        } else if (oldPlaying && !newPlaying) {
-          this.stopStarCitizen(userId, username);
-        } else {
-          this.touchUser(userId, username);
-        }
-
-        this.captureConcurrencySnapshot(member.guild);
-      } catch (error) {
-        console.error('presenceUpdate tracker error:', error);
-      }
-    });
-
-    this.client.on('guildMemberRemove', member => {
-      try {
-        if (member.user?.bot) return;
-        const username = member.displayName || member.user.username || 'Unknown User';
-        this.stopVoice(member.id, username);
-        this.stopStarCitizen(member.id, username);
-      } catch (error) {
-        console.error('guildMemberRemove tracker error:', error);
-      }
-    });
-
-    this.client.on('guildMemberUpdate', (oldMember, newMember) => {
-      try {
-        if (newMember.user?.bot) return;
-
-        const hadRole = this.memberHasTrackedRole(oldMember);
-        const hasRole = this.memberHasTrackedRole(newMember);
-        const username = newMember.displayName || newMember.user.username || 'Unknown User';
-        const user = this.getUser(newMember.id, username);
-
-        if (!hadRole && hasRole) {
-          user.current.tracked = true;
-
-          if (newMember.voice?.channelId) {
-            this.startVoice(
-              newMember.id,
-              username,
-              newMember.voice.channelId,
-              newMember.voice.channel?.name || newMember.voice.channelId,
-            );
-          }
-
-          if (this.isPlayingStarCitizen(newMember.presence)) {
-            this.startStarCitizen(newMember.id, username);
-          }
-        }
-
-        if (hadRole && !hasRole) {
-          user.current.tracked = false;
-          this.stopVoice(newMember.id, username);
-          this.stopStarCitizen(newMember.id, username);
-        }
-
-        this.captureConcurrencySnapshot(newMember.guild);
-      } catch (error) {
-        console.error('guildMemberUpdate tracker error:', error);
-      }
-    });
-  }
-
-  memberHasTrackedRole(member) {
-    if (!member || !member.roles?.cache) return false;
-    if (TRACKED_ROLE_ID) return member.roles.cache.has(TRACKED_ROLE_ID);
-
-    const target = TRACKED_ROLE_NAME.toLowerCase();
-    return member.roles.cache.some(role => String(role.name || '').trim().toLowerCase() === target);
-  }
-
-  async hydrateGuild(guild) {
-    if (!guild) return;
-
+  if (ALERT_USER_ID) {
     try {
-      await guild.members.fetch();
+      return await clientInstance.users.fetch(ALERT_USER_ID);
     } catch (error) {
-      console.error(`Failed to fetch members for guild ${guild.id}:`, error.message);
-    }
-
-    for (const member of guild.members.cache.values()) {
-      if (member.user?.bot) continue;
-      if (!this.memberHasTrackedRole(member)) continue;
-
-      const username = member.displayName || member.user.username || 'Unknown User';
-      const user = this.touchUser(member.id, username);
-      user.current.tracked = true;
-
-      if (member.voice?.channelId) {
-        this.startVoice(
-          member.id,
-          username,
-          member.voice.channelId,
-          member.voice.channel?.name || member.voice.channelId,
-        );
-      }
-
-      if (this.isPlayingStarCitizen(member.presence)) {
-        this.startStarCitizen(member.id, username);
-      }
-    }
-
-    this.captureConcurrencySnapshot(guild);
-    this.save();
-  }
-
-  isPlayingStarCitizen(presence) {
-    const activities = presence?.activities || [];
-    return activities.some(activity =>
-      STAR_CITIZEN_MATCH.test(activity?.name || '') ||
-      STAR_CITIZEN_MATCH.test(activity?.details || ''),
-    );
-  }
-
-  getUser(userId, username = 'Unknown User') {
-    if (!this.state.users[userId]) {
-      this.state.users[userId] = createEmptyUser(userId, username);
-    }
-
-    this.touchUser(userId, username);
-    return this.state.users[userId];
-  }
-
-  touchUser(userId, username) {
-    const user = this.state.users[userId] || createEmptyUser(userId, username);
-    if (username) user.username = username;
-    this.state.users[userId] = user;
-    return user;
-  }
-
-  getTextChannel(channelId, channelName = 'Unknown Channel') {
-    if (!channelId) return null;
-    if (!this.state.textChannels) this.state.textChannels = {};
-
-    if (!this.state.textChannels[channelId]) {
-      this.state.textChannels[channelId] = createEmptyTextChannel(channelId, channelName);
-    }
-
-    const channel = this.state.textChannels[channelId];
-    if (channelName) channel.name = channelName;
-    return channel;
-  }
-
-  getVoiceChannel(channelId, channelName = 'Unknown Voice') {
-    if (!channelId) return null;
-    if (!this.state.voiceChannels) this.state.voiceChannels = {};
-
-    if (!this.state.voiceChannels[channelId]) {
-      this.state.voiceChannels[channelId] = createEmptyVoiceChannel(channelId, channelName);
-    }
-
-    const channel = this.state.voiceChannels[channelId];
-    if (channelName) channel.name = channelName;
-    return channel;
-  }
-
-  incrementMessage(userId, username, channelId = null, channelName = null) {
-    const user = this.getUser(userId, username);
-    const dayKey = getDayKey();
-
-    user.messages[dayKey] = (user.messages[dayKey] || 0) + 1;
-    user.totals.messages += 1;
-
-    const textChannel = this.getTextChannel(channelId, channelName);
-    if (textChannel) {
-      textChannel.messages[dayKey] = (textChannel.messages[dayKey] || 0) + 1;
-      textChannel.totals.messages += 1;
-    }
-
-    this.scheduleSave();
-  }
-
-  addSeconds(mapKey, totalsKey, userId, username, seconds, dayKey = getDayKey()) {
-    if (seconds <= 0) return;
-
-    const user = this.getUser(userId, username);
-    user[mapKey][dayKey] = (user[mapKey][dayKey] || 0) + seconds;
-    user.totals[totalsKey] += seconds;
-    this.scheduleSave();
-  }
-
-  addVoiceChannelSeconds(channelId, channelName, seconds, dayKey = getDayKey()) {
-    if (!channelId || seconds <= 0) return;
-
-    const voiceChannel = this.getVoiceChannel(channelId, channelName);
-    if (!voiceChannel) return;
-
-    voiceChannel.voiceSeconds[dayKey] = (voiceChannel.voiceSeconds[dayKey] || 0) + seconds;
-    voiceChannel.totals.voiceSeconds += seconds;
-    this.scheduleSave();
-  }
-
-  startVoice(userId, username, channelId, channelName) {
-    const user = this.getUser(userId, username);
-
-    if (!user.current.voiceStartedAt) {
-      user.current.voiceStartedAt = now();
-      user.current.voiceChannelId = channelId || null;
-      if (channelId) this.getVoiceChannel(channelId, channelName);
-      return;
-    }
-
-    user.current.voiceChannelId = channelId || user.current.voiceChannelId;
-    if (channelId) this.getVoiceChannel(channelId, channelName);
-  }
-
-  stopVoice(userId, username) {
-    const user = this.getUser(userId, username);
-    if (!user.current.voiceStartedAt) return;
-
-    const elapsed = Math.max(0, Math.floor((now() - user.current.voiceStartedAt) / 1000));
-    const channelId = user.current.voiceChannelId || null;
-    const channelName = channelId ? (this.state.voiceChannels[channelId]?.name || channelId) : 'Unknown Voice';
-
-    user.current.voiceStartedAt = null;
-    user.current.voiceChannelId = null;
-
-    this.addSeconds('voiceSeconds', 'voiceSeconds', userId, username, elapsed);
-    this.addVoiceChannelSeconds(channelId, channelName, elapsed);
-  }
-
-  startStarCitizen(userId, username) {
-    const user = this.getUser(userId, username);
-    if (!user.current.starCitizenStartedAt) {
-      user.current.starCitizenStartedAt = now();
+      console.error('Failed to fetch ALERT_USER_ID:', error);
     }
   }
 
-  stopStarCitizen(userId, username) {
-    const user = this.getUser(userId, username);
-    if (!user.current.starCitizenStartedAt) return;
+  const guild = getAlertGuild(clientInstance);
+  if (!guild) return null;
 
-    const elapsed = Math.max(0, Math.floor((now() - user.current.starCitizenStartedAt) / 1000));
-    user.current.starCitizenStartedAt = null;
-    this.addSeconds('starCitizenSeconds', 'starCitizenSeconds', userId, username, elapsed);
+  try {
+    const owner = await guild.fetchOwner();
+    return owner?.user || null;
+  } catch (error) {
+    console.error('Failed to fetch alert guild owner:', error);
+    return null;
+  }
+}
+
+function readMonitorState() {
+  return safeReadJson(MONITOR_FILE, {
+    running: false,
+    cleanShutdown: true,
+    lastHeartbeat: null,
+    lastBootAt: null,
+    lastShutdownAt: null,
+    lastShutdownReason: null,
+    lastCrashCode: null,
+    lastCrashSource: null,
+    guildId: null,
+  });
+}
+
+function writeMonitorState(patch = {}) {
+  const next = {
+    ...readMonitorState(),
+    ...patch,
+  };
+  safeWriteJson(MONITOR_FILE, next);
+  return next;
+}
+
+function touchHeartbeat() {
+  writeMonitorState({
+    running: true,
+    cleanShutdown: false,
+    lastHeartbeat: Date.now(),
+  });
+}
+
+function startHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  touchHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    touchHeartbeat();
+  }, 60 * 1000);
+  heartbeatTimer.unref();
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function formatErrorStack(error) {
+  const stack = String(error?.stack || error || 'No stack available');
+  return stack.split('\n').map(line => line.trim()).filter(Boolean);
+}
+
+function extractSourceHint(error) {
+  const stackLines = formatErrorStack(error);
+  const match = stackLines.find(line =>
+    line.includes('/discord-tradebot/') || line.includes('index.js') || line.includes('tracker.js')
+  );
+
+  if (!match) {
+    return {
+      sourceText: 'Unknown source',
+      sourceLink: 'Not available',
+    };
   }
 
-  flushOpenSessions() {
-    const stamp = now();
-    const dayKey = getDayKey(stamp);
+  const fileMatch = match.match(/(\/[^:\s)]+\.(?:js|mjs|cjs)):(\d+):(\d+)/);
+  if (!fileMatch) {
+    return {
+      sourceText: match,
+      sourceLink: 'Not available',
+    };
+  }
 
-    for (const user of Object.values(this.state.users)) {
-      if (!user.current?.tracked) continue;
+  const [, filePath, line, column] = fileMatch;
+  return {
+    sourceText: `${filePath}:${line}:${column}`,
+    sourceLink: `file://${filePath}#L${line}`,
+  };
+}
 
-      if (user.current.voiceStartedAt) {
-        const elapsed = Math.max(0, Math.floor((stamp - user.current.voiceStartedAt) / 1000));
-        user.current.voiceStartedAt = stamp;
+async function sendAlert({ code, summary, details, error = null, source = null }) {
+  try {
+    const user = await getAlertUser(client);
+    if (!user) return;
 
-        user.voiceSeconds[dayKey] = (user.voiceSeconds[dayKey] || 0) + elapsed;
-        user.totals.voiceSeconds += elapsed;
+    const sourceHint = source || extractSourceHint(error);
+    const stackLines = formatErrorStack(error).slice(0, 5);
 
-        if (user.current.voiceChannelId) {
-          const channelId = user.current.voiceChannelId;
-          const channelName = this.state.voiceChannels[channelId]?.name || channelId;
-          this.addVoiceChannelSeconds(channelId, channelName, elapsed, dayKey);
+    const embed = new EmbedBuilder()
+      .setColor(0xef4444)
+      .setTitle(`Bot Alert · ${code}`)
+      .addFields(
+        { name: 'Summary', value: summary || 'No summary provided.', inline: false },
+        { name: 'Explanation', value: details || 'No extra details provided.', inline: false },
+        { name: 'Source', value: sourceHint.sourceText || 'Unknown source', inline: false },
+        { name: 'Origin Link', value: sourceHint.sourceLink || 'Not available', inline: false },
+      )
+      .setTimestamp();
+
+    if (stackLines.length) {
+      embed.addFields({
+        name: 'Stack',
+        value: `\`\`\`\n${stackLines.join('\n').slice(0, 980)}\n\`\`\``,
+        inline: false,
+      });
+    }
+
+    await user.send({ embeds: [embed] });
+  } catch (alertError) {
+    console.error('Failed to send alert DM:', alertError);
+  }
+}
+
+async function handleRecoveredOfflineState() {
+  const previous = readMonitorState();
+  if (!previous.lastBootAt) return;
+  if (previous.cleanShutdown) return;
+
+  const downtimeText = previous.lastHeartbeat
+    ? `<t:${Math.floor(previous.lastHeartbeat / 1000)}:R>`
+    : 'unknown time';
+
+  await sendAlert({
+    code: 'BOT_RECOVERED',
+    summary: 'The bot restarted after an unclean shutdown.',
+    details: `The previous run appears to have gone offline unexpectedly. Last heartbeat was ${downtimeText}.`,
+    source: {
+      sourceText: previous.lastCrashSource || 'Previous runtime state',
+      sourceLink: previous.lastCrashSource ? `file://${String(previous.lastCrashSource).split(':')[0]}` : 'Not available',
+    },
+  });
+}
+
+async function markStartupState() {
+  await handleRecoveredOfflineState();
+  const guild = getAlertGuild(client);
+  writeMonitorState({
+    running: true,
+    cleanShutdown: false,
+    lastBootAt: Date.now(),
+    lastHeartbeat: Date.now(),
+    lastShutdownAt: null,
+    lastShutdownReason: null,
+    guildId: guild?.id || null,
+    lastCrashCode: null,
+    lastCrashSource: null,
+  });
+  startHeartbeat();
+}
+
+async function gracefulShutdown(reason = 'SIGINT') {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopHeartbeat();
+  writeMonitorState({
+    running: false,
+    cleanShutdown: true,
+    lastShutdownAt: Date.now(),
+    lastShutdownReason: reason,
+  });
+  process.exit(0);
+}
+
+process.on('SIGINT', () => {
+  void gracefulShutdown('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+  void gracefulShutdown('SIGTERM');
+});
+
+process.on('unhandledRejection', reason => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('Unhandled promise rejection:', error);
+  const sourceHint = extractSourceHint(error);
+  writeMonitorState({
+    running: true,
+    cleanShutdown: false,
+    lastCrashCode: 'UNHANDLED_REJECTION',
+    lastCrashSource: sourceHint.sourceText,
+    lastHeartbeat: Date.now(),
+  });
+  void sendAlert({
+    code: 'UNHANDLED_REJECTION',
+    summary: 'A promise rejection was not handled by the bot.',
+    details: error.message,
+    error,
+    source: sourceHint,
+  });
+});
+
+process.on('uncaughtException', error => {
+  console.error('Uncaught exception:', error);
+  const sourceHint = extractSourceHint(error);
+  writeMonitorState({
+    running: false,
+    cleanShutdown: false,
+    lastCrashCode: 'UNCAUGHT_EXCEPTION',
+    lastCrashSource: sourceHint.sourceText,
+    lastHeartbeat: Date.now(),
+  });
+  void sendAlert({
+    code: 'UNCAUGHT_EXCEPTION',
+    summary: 'The bot hit an uncaught exception and is shutting down.',
+    details: error.message,
+    error,
+    source: sourceHint,
+  }).finally(() => {
+    setTimeout(() => process.exit(1), 750).unref();
+  });
+});
+
+function loadStateStoreFromDisk() {
+  const data = safeReadJson(STATE_FILE, {});
+  const now = Date.now();
+
+  for (const [key, value] of Object.entries(data)) {
+    if (!value || typeof value !== 'object') continue;
+    if (!value.createdAt || now - value.createdAt > STATE_TTL_MS) continue;
+    routeStates.set(key, value);
+  }
+
+  persistStateStore();
+}
+
+function persistStateStore() {
+  const obj = {};
+  const now = Date.now();
+
+  for (const [key, value] of routeStates.entries()) {
+    if (!value || !value.createdAt) continue;
+    if (now - value.createdAt > STATE_TTL_MS) continue;
+    obj[key] = value;
+  }
+
+  safeWriteJson(STATE_FILE, obj);
+}
+
+function cleanupRouteStates() {
+  const now = Date.now();
+  let changed = false;
+
+  for (const [key, value] of routeStates.entries()) {
+    if (now - value.createdAt > STATE_TTL_MS) {
+      routeStates.delete(key);
+      changed = true;
+    }
+  }
+
+  if (changed) persistStateStore();
+}
+
+function saveRouteState(state, existingId = null) {
+  cleanupRouteStates();
+
+  const id = existingId || crypto.randomBytes(8).toString('hex');
+  routeStates.set(id, {
+    ...state,
+    createdAt: Date.now(),
+  });
+  persistStateStore();
+  return id;
+}
+
+function getRouteState(stateId) {
+  cleanupRouteStates();
+  return routeStates.get(stateId) || null;
+}
+
+async function fetchJson(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'SPACEWHLE Trade Command Bot',
+        Accept: 'application/json',
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function getRiskLabel(score) {
+  if (score <= 20) return 'Low';
+  if (score <= 40) return 'Moderate';
+  if (score <= 60) return 'Elevated';
+  if (score <= 80) return 'High';
+  return 'Severe';
+}
+
+function locationDisplayName(terminal) {
+  return terminal.fullname || terminal.displayname || terminal.terminal_name || terminal.name || 'Unknown Terminal';
+}
+
+function pickMainLocationName(terminal) {
+  return (
+    terminal.space_station_name ||
+    terminal.city_name ||
+    terminal.outpost_name ||
+    terminal.poi_name ||
+    terminal.moon_name ||
+    terminal.planet_name ||
+    terminal.star_system_name ||
+    locationDisplayName(terminal)
+  );
+}
+
+function pickSystemName(terminal) {
+  return terminal.star_system_name || 'Unknown System';
+}
+
+function isAtmosphericTerminal(terminal) {
+  return Boolean(
+    terminal.id_city ||
+    terminal.id_outpost ||
+    (terminal.id_planet && !terminal.id_space_station)
+  );
+}
+
+function getTerminalTypeLabel(terminal) {
+  if (terminal.space_station_name) return 'Station';
+  if (terminal.city_name) return 'City';
+  if (terminal.outpost_name) return 'Outpost';
+  if (terminal.poi_name) return 'POI';
+  if (terminal.moon_name) return 'Moon';
+  if (terminal.planet_name) return 'Planet';
+  return 'Location';
+}
+
+function buildGroupedLocationIndex(terminals, prices) {
+  const terminalMap = new Map(terminals.map(terminal => [Number(terminal.id), terminal]));
+  const groupsMap = new Map();
+  const commodityNames = new Set();
+
+  for (const row of prices) {
+    const terminal = terminalMap.get(Number(row.id_terminal));
+    if (!terminal) continue;
+
+    const commodityName = row.commodity_name || row.name || 'Unknown Commodity';
+    commodityNames.add(commodityName);
+
+    const mainLocation = pickMainLocationName(terminal);
+    const system = pickSystemName(terminal);
+    const key = `${normalizeText(mainLocation)}|${normalizeText(system)}`;
+
+    if (!groupsMap.has(key)) {
+      groupsMap.set(key, {
+        key,
+        name: `${mainLocation} — ${system}`,
+        shortName: mainLocation,
+        system,
+        locationType: getTerminalTypeLabel(terminal),
+        atmospheric: false,
+        terminals: new Map(),
+      });
+    }
+
+    const group = groupsMap.get(key);
+    group.atmospheric ||= isAtmosphericTerminal(terminal);
+
+    const terminalId = Number(row.id_terminal);
+    if (!group.terminals.has(terminalId)) {
+      group.terminals.set(terminalId, {
+        terminalId,
+        name: locationDisplayName(terminal),
+        sells: [],
+        buys: [],
+        atmospheric: isAtmosphericTerminal(terminal),
+      });
+    }
+
+    const terminalEntry = group.terminals.get(terminalId);
+
+    if (Number(row.price_buy) > 0) {
+      terminalEntry.sells.push({
+        commodity: commodityName,
+        price: Number(row.price_buy),
+        stock: Number(row.scu_buy ?? row.scu_buy_avg ?? row.scu_buy_stock ?? 0),
+      });
+    }
+
+    if (Number(row.price_sell) > 0) {
+      terminalEntry.buys.push({
+        commodity: commodityName,
+        price: Number(row.price_sell),
+        demand: Number(row.scu_sell ?? row.scu_sell_avg ?? row.scu_sell_stock ?? 0),
+      });
+    }
+  }
+
+  const groups = Array.from(groupsMap.values())
+    .map(group => {
+      group.terminals = Array.from(group.terminals.values()).sort((a, b) => a.name.localeCompare(b.name));
+
+      const sells = new Map();
+      const buys = new Map();
+
+      for (const terminal of group.terminals) {
+        for (const item of terminal.sells) {
+          const existing = sells.get(item.commodity);
+          if (!existing || item.price < existing.price) {
+            sells.set(item.commodity, {
+              commodity: item.commodity,
+              price: item.price,
+              stock: item.stock,
+              terminalName: terminal.name,
+              atmospheric: terminal.atmospheric,
+            });
+          }
+        }
+
+        for (const item of terminal.buys) {
+          const existing = buys.get(item.commodity);
+          if (!existing || item.price > existing.price) {
+            buys.set(item.commodity, {
+              commodity: item.commodity,
+              price: item.price,
+              demand: item.demand,
+              terminalName: terminal.name,
+              atmospheric: terminal.atmospheric,
+            });
+          }
         }
       }
 
-      if (user.current.starCitizenStartedAt) {
-        const elapsed = Math.max(0, Math.floor((stamp - user.current.starCitizenStartedAt) / 1000));
-        user.current.starCitizenStartedAt = stamp;
-        user.starCitizenSeconds[dayKey] = (user.starCitizenSeconds[dayKey] || 0) + elapsed;
-        user.totals.starCitizenSeconds += elapsed;
-      }
+      group.sells = Array.from(sells.values()).sort((a, b) => a.commodity.localeCompare(b.commodity));
+      group.buys = Array.from(buys.values()).sort((a, b) => a.commodity.localeCompare(b.commodity));
+
+      return group;
+    })
+    .filter(group => group.sells.length || group.buys.length)
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return {
+    groups,
+    shortGroupNames: groups
+      .map(group => group.shortName)
+      .filter((value, index, arr) => arr.indexOf(value) === index)
+      .sort((a, b) => a.localeCompare(b)),
+    commodityNames: Array.from(commodityNames).sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+function buildRouteIndex(groups) {
+  const sellersByCommodity = new Map();
+  const buyersByCommodity = new Map();
+
+  for (const group of groups) {
+    for (const sell of group.sells) {
+      if (!sellersByCommodity.has(sell.commodity)) sellersByCommodity.set(sell.commodity, []);
+      sellersByCommodity.get(sell.commodity).push({
+        groupName: group.name,
+        shortGroupName: group.shortName,
+        system: group.system,
+        locationType: group.locationType,
+        atmospheric: group.atmospheric || sell.atmospheric,
+        terminalName: sell.terminalName,
+        price: sell.price,
+        stock: sell.stock,
+      });
     }
 
-    this.captureAllConcurrencySnapshots();
-    this.scheduleSave();
-  }
-
-  captureAllConcurrencySnapshots() {
-    for (const guild of this.client.guilds.cache.values()) {
-      this.captureConcurrencySnapshot(guild);
-    }
-  }
-
-  captureConcurrencySnapshot(guild) {
-    if (!guild) return;
-
-    let count = 0;
-    const names = [];
-
-    for (const member of guild.members.cache.values()) {
-      if (member.user?.bot) continue;
-      if (!this.memberHasTrackedRole(member)) continue;
-
-      if (this.isPlayingStarCitizen(member.presence)) {
-        count += 1;
-        names.push(member.displayName || member.user.username || 'Unknown User');
-      }
-    }
-
-    const dayKey = getDayKey();
-    if (!this.state.concurrency[dayKey]) this.state.concurrency[dayKey] = [];
-    this.state.concurrency[dayKey].push({ ts: now(), count });
-    this.state.concurrency[dayKey] = this.state.concurrency[dayKey].slice(-1500);
-
-    if (!this.state.peaks[dayKey] || count >= this.state.peaks[dayKey].count) {
-      this.state.peaks[dayKey] = { ts: now(), count, names: names.slice(0, 25) };
-    }
-
-    this.scheduleSave();
-  }
-
-  cleanupState() {
-    for (const user of Object.values(this.state.users || {})) {
-      cleanupDailyMap(user.messages || {});
-      cleanupDailyMap(user.voiceSeconds || {});
-      cleanupDailyMap(user.starCitizenSeconds || {});
-    }
-
-    for (const channel of Object.values(this.state.textChannels || {})) {
-      cleanupDailyMap(channel.messages || {});
-    }
-
-    for (const channel of Object.values(this.state.voiceChannels || {})) {
-      cleanupDailyMap(channel.voiceSeconds || {});
-    }
-
-    const cutoff = new Date(now() - MAX_DAYS * ONE_DAY_MS).toISOString().slice(0, 10);
-
-    for (const key of Object.keys(this.state.concurrency || {})) {
-      if (key < cutoff) delete this.state.concurrency[key];
-    }
-
-    for (const key of Object.keys(this.state.peaks || {})) {
-      if (key < cutoff) delete this.state.peaks[key];
+    for (const buy of group.buys) {
+      if (!buyersByCommodity.has(buy.commodity)) buyersByCommodity.set(buy.commodity, []);
+      buyersByCommodity.get(buy.commodity).push({
+        groupName: group.name,
+        shortGroupName: group.shortName,
+        system: group.system,
+        locationType: group.locationType,
+        atmospheric: group.atmospheric || buy.atmospheric,
+        terminalName: buy.terminalName,
+        price: buy.price,
+        demand: buy.demand,
+      });
     }
   }
 
-  scheduleSave() {
-    if (this.saveTimer) return;
+  const routes = [];
 
-    this.saveTimer = setTimeout(() => {
-      this.saveTimer = null;
-      this.save();
-    }, 5000).unref();
-  }
+  for (const [commodity, sellersRaw] of sellersByCommodity.entries()) {
+    const buyersRaw = buyersByCommodity.get(commodity);
+    if (!buyersRaw?.length) continue;
 
-  save() {
-    this.cleanupState();
-    this.state.meta.lastSavedAt = now();
-    safeWriteJson(STATE_FILE, this.state);
-  }
+    const sellers = [...sellersRaw].sort((a, b) => a.price - b.price).slice(0, 20);
+    const buyers = [...buyersRaw].sort((a, b) => b.price - a.price).slice(0, 20);
 
-  getRangeDayKeys(days = 7) {
-    const keys = [];
-    for (let i = days - 1; i >= 0; i -= 1) {
-      keys.push(getDayKey(now() - i * ONE_DAY_MS));
-    }
-    return keys;
-  }
+    for (const seller of sellers) {
+      for (const buyer of buyers) {
+        if (seller.groupName === buyer.groupName) continue;
 
-  sumMap(map, dayKeys) {
-    return dayKeys.reduce((sum, dayKey) => sum + Number(map?.[dayKey] || 0), 0);
-  }
+        const profitPerScu = buyer.price - seller.price;
+        if (profitPerScu <= 0) continue;
 
-  getTrackedMemberIds() {
-    const ids = new Set();
-
-    for (const guild of this.client.guilds.cache.values()) {
-      for (const member of guild.members.cache.values()) {
-        if (member.user?.bot) continue;
-        if (this.memberHasTrackedRole(member)) ids.add(member.id);
-      }
-    }
-
-    return ids;
-  }
-
-  getTrackedUsers() {
-    const trackedIds = this.getTrackedMemberIds();
-    return Array.from(trackedIds)
-      .map(userId => this.state.users[userId])
-      .filter(Boolean);
-  }
-
-  getLeaderboard(days = 7) {
-    const dayKeys = this.getRangeDayKeys(days);
-    const trackedUsers = this.getTrackedUsers();
-
-    const rows = trackedUsers
-      .map(user => ({
-        userId: user.userId,
-        username: user.username,
-        messages: this.sumMap(user.messages, dayKeys),
-        voiceSeconds: this.sumMap(user.voiceSeconds, dayKeys),
-        starCitizenSeconds: this.sumMap(user.starCitizenSeconds, dayKeys),
-      }))
-      .filter(row => row.messages > 0 || row.voiceSeconds > 0 || row.starCitizenSeconds > 0);
-
-    return {
-      all: rows,
-      messages: [...rows].sort((a, b) => b.messages - a.messages),
-      voice: [...rows].sort((a, b) => b.voiceSeconds - a.voiceSeconds),
-      starCitizen: [...rows].sort((a, b) => b.starCitizenSeconds - a.starCitizenSeconds),
-      dayKeys,
-      trackedUsers,
-    };
-  }
-
-  getUserStats(userId, days = 7) {
-    const user = this.state.users[userId];
-    if (!user) return null;
-
-    const dayKeys = this.getRangeDayKeys(days);
-
-    return {
-      userId,
-      username: user.username,
-      totals: {
-        messages: this.sumMap(user.messages, dayKeys),
-        voiceSeconds: this.sumMap(user.voiceSeconds, dayKeys),
-        starCitizenSeconds: this.sumMap(user.starCitizenSeconds, dayKeys),
-      },
-      current: {
-        voiceStartedAt: user.current?.voiceStartedAt || null,
-        starCitizenStartedAt: user.current?.starCitizenStartedAt || null,
-      },
-      daily: dayKeys.map(dayKey => ({
-        dayKey,
-        label: formatDisplayDate(dayKey),
-        messages: Number(user.messages?.[dayKey] || 0),
-        voiceHours: Number((Number(user.voiceSeconds?.[dayKey] || 0) / 3600).toFixed(2)),
-        starCitizenHours: Number((Number(user.starCitizenSeconds?.[dayKey] || 0) / 3600).toFixed(2)),
-      })),
-    };
-  }
-
-  getCurrentPlayers(guild) {
-    if (!guild) return { count: 0, players: [] };
-
-    const players = [];
-    for (const member of guild.members.cache.values()) {
-      if (member.user?.bot) continue;
-      if (!this.memberHasTrackedRole(member)) continue;
-
-      if (this.isPlayingStarCitizen(member.presence)) {
-        players.push({
-          id: member.id,
-          name: member.displayName || member.user.username || 'Unknown User',
-          startedAt: this.state.users[member.id]?.current?.starCitizenStartedAt || null,
+        routes.push({
+          commodity,
+          buyGroup: seller.groupName,
+          buyShortGroup: seller.shortGroupName,
+          sellGroup: buyer.groupName,
+          sellShortGroup: buyer.shortGroupName,
+          buyTerminal: seller.terminalName,
+          sellTerminal: buyer.terminalName,
+          buySystem: seller.system,
+          sellSystem: buyer.system,
+          buyLocationType: seller.locationType,
+          sellLocationType: buyer.locationType,
+          buyRequiresAtmosphere: seller.atmospheric,
+          sellRequiresAtmosphere: buyer.atmospheric,
+          buyPricePerScu: seller.price,
+          sellPricePerScu: buyer.price,
+          buyStock: seller.stock,
+          sellDemand: buyer.demand,
+          interSystem: seller.system !== buyer.system,
+          profitPerScu,
         });
       }
     }
-
-    players.sort((a, b) => a.name.localeCompare(b.name));
-    return { count: players.length, players };
   }
 
-  getPeakForRange(days = 7) {
-    const dayKeys = this.getRangeDayKeys(days);
-    let best = { count: 0, ts: null, names: [] };
+  return routes;
+}
 
-    for (const dayKey of dayKeys) {
-      const peak = this.state.peaks?.[dayKey];
-      if (peak && peak.count >= best.count) best = peak;
+async function loadMarketData(force = false) {
+  const now = Date.now();
+  if (!force && cache.lastUpdated && now - cache.lastUpdated < CACHE_TTL_MS) {
+    return cache;
+  }
+
+  const [terminalsPayload, pricesPayload] = await Promise.all([
+    fetchJson('https://api.uexcorp.space/2.0/terminals?type=commodity'),
+    fetchJson('https://api.uexcorp.space/2.0/commodities_prices_all'),
+  ]);
+
+  const terminals = getArrayPayload(terminalsPayload).filter(
+    terminal => String(terminal.type || '').toLowerCase() === 'commodity'
+  );
+  const prices = getArrayPayload(pricesPayload);
+  const grouped = buildGroupedLocationIndex(terminals, prices);
+
+  cache.lastUpdated = now;
+  cache.groups = grouped.groups;
+  cache.shortGroupNames = grouped.shortGroupNames;
+  cache.routes = buildRouteIndex(grouped.groups);
+  cache.commodityNames = grouped.commodityNames;
+
+  return cache;
+}
+
+function getLocationRiskModifier(route) {
+  let risk = 0;
+  const buy = normalizeText(route.buyGroup);
+  const sell = normalizeText(route.sellGroup);
+
+  if (buy.includes('ruin station') || sell.includes('ruin station')) risk += 8;
+  if (buy.includes('orbituary') || sell.includes('orbituary')) risk += 5;
+  if (buy.includes('gateway') || sell.includes('gateway')) risk += 3;
+
+  return risk;
+}
+
+function getRiskScore(route, cargo, cargoValue, shipName) {
+  const ship = getShipProfile(shipName);
+  let risk = 0;
+
+  if (route.buySystem === 'Pyro' || route.sellSystem === 'Pyro') risk += 50;
+  if (route.buySystem === 'Nyx' || route.sellSystem === 'Nyx') risk += 25;
+  if (route.interSystem) risk += 15;
+  if (cargo > 750) risk += 10;
+  if (cargoValue > 10000000) risk += 15;
+  else if (cargoValue > 1000000) risk += 5;
+
+  risk += getLocationRiskModifier(route);
+  risk += ship.shipRiskModifier;
+
+  return Math.round(clamp(risk, 0, 100));
+}
+
+function getRiskReasons(route, cargo, cargoValue, shipName) {
+  const ship = getShipProfile(shipName);
+  const reasons = [];
+
+  if (route.buySystem === 'Pyro' || route.sellSystem === 'Pyro') reasons.push('Pyro involvement');
+  if (route.buySystem === 'Nyx' || route.sellSystem === 'Nyx') reasons.push('Nyx involvement');
+  if (route.interSystem) reasons.push('inter-system travel');
+  if (cargo > 750) reasons.push('very large cargo load');
+  if (cargoValue > 10000000) reasons.push('extremely high cargo value');
+  else if (cargoValue > 1000000) reasons.push('high cargo value');
+  if (ship.military) reasons.push('military hull lowered risk');
+  else if (ship.cargo <= 32) reasons.push('smaller cargo ship');
+
+  if (!reasons.length) reasons.push('no major risk factors');
+  return reasons.slice(0, 4).join(', ');
+}
+
+function estimateEndpointTime(locationType, requiresAtmosphere, terminalName) {
+  const type = normalizeText(locationType);
+  const terminal = normalizeText(terminalName);
+  let time = 2;
+
+  if (type.includes('station')) time += 2;
+  if (type.includes('city')) time += 6;
+  if (type.includes('outpost')) time += 4;
+  if (requiresAtmosphere) time += 4;
+  if (terminal.includes('gateway')) time += 3;
+
+  return time;
+}
+
+function getFlightTime(route) {
+  const quantum = route.interSystem ? 18 : 7;
+  const endpointOps =
+    estimateEndpointTime(route.buyLocationType, route.buyRequiresAtmosphere, route.buyTerminal) +
+    estimateEndpointTime(route.sellLocationType, route.sellRequiresAtmosphere, route.sellTerminal);
+  const terminalOps = 4;
+  const buffer = route.interSystem ? 4 : 2;
+  const total = quantum + endpointOps + terminalOps + buffer;
+
+  return { total, quantum, endpointOps, terminalOps, buffer, label: `~${total} min` };
+}
+
+function findMatchingGroup(locationInput) {
+  if (!locationInput) return null;
+  const needle = normalizeText(locationInput);
+
+  return (
+    cache.groups.find(group => normalizeText(group.shortName) === needle || normalizeText(group.name) === needle) ||
+    cache.groups.find(group => normalizeText(group.shortName).includes(needle) || normalizeText(group.name).includes(needle)) ||
+    null
+  );
+}
+
+function getDockingPreferenceBonus(route) {
+  let bonus = 0;
+
+  const buyType = normalizeText(route.buyLocationType);
+  const sellType = normalizeText(route.sellLocationType);
+
+  if (buyType.includes('station')) bonus += 500;
+  if (sellType.includes('station')) bonus += 500;
+  if (buyType.includes('city')) bonus += 150;
+  if (sellType.includes('city')) bonus += 150;
+  if (buyType.includes('outpost')) bonus -= 700;
+  if (sellType.includes('outpost')) bonus -= 700;
+
+  return bonus;
+}
+
+function scoreRoute(route, desiredCargo, shipName, budget = null) {
+  const ship = getShipProfile(shipName);
+  let effectiveCargo = desiredCargo;
+
+  if (budget && route.buyPricePerScu > 0) {
+    effectiveCargo = Math.min(effectiveCargo, Math.floor(budget / route.buyPricePerScu));
+  }
+
+  effectiveCargo = Math.min(effectiveCargo, ship.cargo);
+
+  if (route.buyStock > 0) effectiveCargo = Math.min(effectiveCargo, route.buyStock);
+  if (route.sellDemand > 0) effectiveCargo = Math.min(effectiveCargo, route.sellDemand);
+  if (effectiveCargo <= 0) return null;
+
+  const cargoValue = route.buyPricePerScu * effectiveCargo;
+  const totalProfit = route.profitPerScu * effectiveCargo;
+  const profitPercent = cargoValue > 0 ? (totalProfit / cargoValue) * 100 : 0;
+  const fillRatio = desiredCargo > 0 ? effectiveCargo / desiredCargo : 0;
+  const riskScore = getRiskScore(route, effectiveCargo, cargoValue, ship.name);
+  const riskReasons = getRiskReasons(route, effectiveCargo, cargoValue, ship.name);
+  const time = getFlightTime(route);
+
+  const rankingScore =
+    (totalProfit * 12) +
+    (fillRatio * 400000) +
+    (!route.interSystem ? 4000 : 0) +
+    getDockingPreferenceBonus(route) -
+    (riskScore * 200) -
+    (time.total * 30);
+
+  return {
+    ...route,
+    effectiveCargo,
+    cargoValue,
+    totalProfit,
+    profitPercent,
+    fillRatio,
+    riskScore,
+    riskReasons,
+    time,
+    shipProfile: ship,
+    rankingScore,
+  };
+}
+
+function getRouteSignature(route) {
+  return [
+    route.commodity,
+    route.buyGroup,
+    route.sellGroup,
+    route.buyTerminal,
+    route.sellTerminal,
+    route.effectiveCargo,
+  ].join('|');
+}
+
+function chooseBestRoute(scoredRoutes, previousSignature = null) {
+  if (!scoredRoutes.length) return null;
+
+  if (previousSignature) {
+    const different = scoredRoutes.find(route => getRouteSignature(route) !== previousSignature);
+    if (different) return different;
+  }
+
+  return scoredRoutes[0];
+}
+
+async function findBestRoute({ cargo, shipName, location, finish, budget, previousSignature = null }) {
+  await Promise.all([loadMarketData(false), ensureShipData(false)]);
+
+  const ship = getShipProfile(shipName);
+  if (!ship) throw new Error('Invalid ship.');
+
+  const desiredCargo = cargo || ship.cargo;
+  const startGroup = location ? findMatchingGroup(location) : null;
+  const finishGroup = finish ? findMatchingGroup(finish) : null;
+
+  const filteredRoutes = cache.routes.filter(route => {
+    if (startGroup && route.buyGroup !== startGroup.name) return false;
+    if (finishGroup && route.sellGroup !== finishGroup.name) return false;
+    return true;
+  });
+
+  const scoredRoutes = filteredRoutes
+    .map(route => scoreRoute(route, desiredCargo, ship.name, budget || null))
+    .filter(Boolean)
+    .sort((a, b) => b.rankingScore - a.rankingScore);
+
+  return {
+    ship,
+    desiredCargo,
+    route: chooseBestRoute(scoredRoutes, previousSignature),
+    startGroup,
+    finishGroup,
+  };
+}
+
+function getBracketCaps() {
+  return [
+    { name: '<25 SCU', cargo: 25 },
+    { name: '<100 SCU', cargo: 100 },
+    { name: '<250 SCU', cargo: 250 },
+    { name: '<500 SCU', cargo: 500 },
+    { name: '>500 SCU', cargo: 1000 },
+  ];
+}
+
+function pickAutocompleteChoices(options, current) {
+  const needle = normalizeText(current);
+  return options
+    .filter(option => !needle || normalizeText(option).includes(needle))
+    .slice(0, 25)
+    .map(option => ({ name: option, value: option }));
+}
+
+async function handleAutocomplete(interaction) {
+  const focused = interaction.options.getFocused(true);
+
+  if (focused.name === 'ship') {
+    await ensureShipData(false);
+    await interaction.respond(pickAutocompleteChoices(getShipChoices(), focused.value));
+    return;
+  }
+
+  if (focused.name === 'location' || focused.name === 'finish') {
+    try {
+      if (!cache.shortGroupNames.length) await loadMarketData(false);
+    } catch (error) {
+      console.error('Autocomplete market load error:', error);
     }
 
-    return best;
+    await interaction.respond(pickAutocompleteChoices(cache.shortGroupNames, focused.value));
+    return;
   }
 
-  buildStatsControlRow(panel, targetId, days, category = 'overview', showTime = false) {
-    return new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(encodeStatsButton('refresh', panel, targetId, days, category, showTime))
-        .setLabel('Refresh')
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(encodeStatsButton('time', panel, targetId, days, category, showTime))
-        .setEmoji('🗓️')
-        .setStyle(ButtonStyle.Secondary),
-    );
+  if (focused.name === 'commodity') {
+    try {
+      if (!cache.commodityNames.length) await loadMarketData(false);
+    } catch (error) {
+      console.error('Commodity autocomplete load error:', error);
+    }
+
+    await interaction.respond(pickAutocompleteChoices(cache.commodityNames, focused.value));
+    return;
   }
 
-  buildRangeButtons(panel, targetId, days, category = 'overview', showTime = true) {
-    const ranges = [1, 7, 14, 30];
+  await interaction.respond([]);
+}
 
-    return new ActionRowBuilder().addComponents(
-      ...ranges.map(range =>
-        new ButtonBuilder()
-          .setCustomId(encodeStatsButton('range', panel, targetId, range, category, showTime))
-          .setLabel(`${range}d`)
-          .setStyle(range === days ? ButtonStyle.Primary : ButtonStyle.Secondary),
-      ),
-    );
+function formatSellListByTerminal(terminals, limitPerTerminal = 8) {
+  const lines = [];
+
+  for (const terminal of terminals) {
+    if (!terminal.sells.length) continue;
+
+    const items = terminal.sells
+      .slice(0, limitPerTerminal)
+      .map(item => `${item.commodity} (${item.price.toLocaleString()}, stock ${item.stock || '?'})`)
+      .join(', ');
+
+    lines.push(`**${terminal.name}**\n${items}`);
   }
 
-  buildLineChartUrl({ title, labels, messages, voiceHours, playtimeHours }) {
-    const config = {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          {
-            label: 'Messages',
-            data: messages,
-            borderColor: COLORS.messages,
-            backgroundColor: COLORS.messages,
-            yAxisID: 'yMessages',
-            borderWidth: 3,
-            pointRadius: 2,
-            tension: 0.35,
-            fill: false,
-          },
-          {
-            label: 'VC Hours',
-            data: voiceHours,
-            borderColor: COLORS.voice,
-            backgroundColor: COLORS.voice,
-            yAxisID: 'yHours',
-            borderWidth: 3,
-            pointRadius: 2,
-            tension: 0.35,
-            fill: false,
-          },
-          {
-            label: 'SC Hours',
-            data: playtimeHours,
-            borderColor: COLORS.playtime,
-            backgroundColor: COLORS.playtime,
-            yAxisID: 'yHours',
-            borderWidth: 3,
-            pointRadius: 2,
-            tension: 0.35,
-            fill: false,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: {
-            position: 'top',
-            labels: { boxWidth: 14, usePointStyle: true },
-          },
-          title: {
-            display: true,
-            text: title,
-          },
-        },
-        scales: {
-          x: {
-            grid: { display: false },
-          },
-          yHours: {
-            type: 'linear',
-            position: 'left',
-            beginAtZero: true,
-            title: { display: true, text: 'Hours' },
-          },
-          yMessages: {
-            type: 'linear',
-            position: 'right',
-            beginAtZero: true,
-            grid: { drawOnChartArea: false },
-            title: { display: true, text: 'Messages' },
-          },
-        },
-      },
+  return lines.length ? lines.slice(0, 10).join('\n\n') : 'Nothing currently listed for sale.';
+}
+
+function formatBuyListByTerminal(terminals, limitPerTerminal = 8) {
+  const lines = [];
+
+  for (const terminal of terminals) {
+    if (!terminal.buys.length) continue;
+
+    const items = terminal.buys
+      .slice(0, limitPerTerminal)
+      .map(item => `${item.commodity} (${item.price.toLocaleString()}, demand ${item.demand || '?'})`)
+      .join(', ');
+
+    lines.push(`**${terminal.name}**\n${items}`);
+  }
+
+  return lines.length ? lines.slice(0, 10).join('\n\n') : 'No commodity buy prices currently listed.';
+}
+
+function filterBuyersForCommodity(commodity, locationFilter) {
+  const commodityNeedle = normalizeText(commodity);
+  const locationNeedle = normalizeText(locationFilter);
+  const buyers = [];
+
+  for (const group of cache.groups) {
+    if (locationNeedle) {
+      const match =
+        normalizeText(group.shortName).includes(locationNeedle) ||
+        normalizeText(group.name).includes(locationNeedle) ||
+        normalizeText(group.system).includes(locationNeedle);
+
+      if (!match) continue;
+    }
+
+    for (const buy of group.buys) {
+      if (normalizeText(buy.commodity) !== commodityNeedle) continue;
+
+      buyers.push({
+        groupName: group.name,
+        shortGroupName: group.shortName,
+        system: group.system,
+        terminalName: buy.terminalName,
+        price: buy.price,
+        demand: buy.demand,
+      });
+    }
+  }
+
+  return buyers.sort((a, b) => b.price - a.price);
+}
+
+function buildControlRow(stateId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`route:refresh:${stateId}`)
+      .setLabel('Refresh')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled),
+    new ButtonBuilder()
+      .setCustomId(`route:invest_down:${stateId}`)
+      .setLabel('Invest -')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled),
+    new ButtonBuilder()
+      .setCustomId(`route:invest_up:${stateId}`)
+      .setLabel('Invest +')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled)
+  );
+}
+
+function getBudgetStep(currentBudget) {
+  if (!currentBudget || currentBudget < 100000) return 25000;
+  if (currentBudget < 500000) return 50000;
+  if (currentBudget < 2000000) return 100000;
+  return 250000;
+}
+
+async function buildRouteResponse(params, existingStateId = null) {
+  const result = await findBestRoute(params);
+
+  if (!result.route) {
+    return {
+      content: 'No matching route found for those filters.',
+      embeds: [],
+      components: [],
+      stateId: existingStateId,
     };
-
-    return `https://quickchart.io/chart?width=1000&height=420&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
   }
 
-  formatTopThree(rows, type) {
-    const top = rows.slice(0, 3);
-    if (!top.length) return 'No data yet.';
+  const route = result.route;
+  const currentBudget = params.budget || route.cargoValue;
 
-    const lines = top.map((row, index) => {
-      let value = '0';
-      if (type === 'messages') value = `${formatNumber(row.messages)}`;
-      if (type === 'voice') value = formatHours(row.voiceSeconds);
-      if (type === 'starCitizen') value = formatHours(row.starCitizenSeconds);
-      return `${index + 1}. ${row.username}  |  ${value}`;
+  const nextState = {
+    shipName: params.shipName,
+    cargo: params.cargo ?? null,
+    budget: currentBudget,
+    location: params.location ?? null,
+    finish: params.finish ?? null,
+    previousSignature: getRouteSignature(route),
+  };
+
+  const stateId = saveRouteState(nextState, existingStateId);
+
+  const fields = [
+    { name: 'Commodity', value: route.commodity, inline: true },
+    { name: 'Start', value: route.buyShortGroup, inline: true },
+    { name: 'Finish', value: route.sellShortGroup, inline: true },
+    { name: 'Cargo Needed', value: `${route.effectiveCargo.toLocaleString()} SCU`, inline: true },
+    { name: 'Ship Cargo', value: `${route.shipProfile.cargo.toLocaleString()} SCU`, inline: true },
+    { name: 'Investment', value: `${route.cargoValue.toLocaleString()} aUEC`, inline: true },
+    { name: 'Profit', value: `${route.totalProfit.toLocaleString()} aUEC`, inline: true },
+    { name: 'ROI', value: `${route.profitPercent.toFixed(1)}%`, inline: true },
+    { name: 'Risk', value: `${route.riskScore}/100 (${getRiskLabel(route.riskScore)})`, inline: true },
+    { name: 'Time', value: route.time.label, inline: true },
+    { name: 'Buy Stock', value: route.buyStock ? `${route.buyStock.toLocaleString()} SCU` : 'Unknown', inline: true },
+    { name: 'Sell Demand', value: route.sellDemand ? `${route.sellDemand.toLocaleString()} SCU` : 'Unknown', inline: true },
+    { name: 'Ship Data Source', value: getShipSourceLabel(), inline: false },
+    { name: 'Risk Reasons', value: route.riskReasons, inline: false },
+  ];
+
+  const embed = new EmbedBuilder()
+    .setColor(0x22d3ee)
+    .setTitle(`Best route for ${route.shipProfile.name}`)
+    .setDescription(`${route.buyShortGroup} → ${route.sellShortGroup}`)
+    .setThumbnail(EMBED_THUMBNAIL_URL)
+    .setImage(EMBED_BANNER_URL)
+    .addFields(fields)
+    .setFooter({
+      text: 'SPACEWHLE Trade Command • live UEX grouped location data',
     });
 
-    return `\`\`\`\n${clampFieldText(lines.join('\n'))}\n\`\`\``;
+  return {
+    content: null,
+    embeds: [embed],
+    components: [buildControlRow(stateId)],
+    stateId,
+  };
+}
+
+async function handleRouteButton(interaction, action, stateId) {
+  const state = getRouteState(stateId);
+
+  if (!state) {
+    await interaction.editReply({
+      content: 'That button has expired. Run the command again.',
+      embeds: [],
+      components: [],
+    });
+    return;
   }
 
-  getUserRankings(userId, days) {
-    const board = this.getLeaderboard(days);
-    const ranks = {
-      messages: board.messages.findIndex(row => row.userId === userId) + 1,
-      voice: board.voice.findIndex(row => row.userId === userId) + 1,
-      starCitizen: board.starCitizen.findIndex(row => row.userId === userId) + 1,
-      totalTracked: board.all.length,
-      board,
-    };
-
-    return ranks;
+  const lockKey = interaction.message.id;
+  if (activeMessageLocks.has(lockKey)) {
+    await interaction.followUp({
+      content: 'That route is already being updated.',
+      ephemeral: true,
+    });
+    return;
   }
 
-  buildBaseStatsEmbed(title, days, chartData) {
-    return new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle(title)
-      .setThumbnail(THUMBNAIL_URL)
-      .setImage(this.buildLineChartUrl(chartData));
-  }
+  activeMessageLocks.add(lockKey);
 
-  buildTopEmbed(days = 7, category = 'overview', showTime = false) {
-    const board = this.getLeaderboard(days);
-    const labels = board.dayKeys.map(formatDisplayDate);
+  try {
+    await interaction.editReply({
+      components: [buildControlRow(stateId, true)],
+    });
 
-    const messagesSeries = board.dayKeys.map(dayKey =>
-      board.trackedUsers.reduce((sum, user) => sum + Number(user.messages?.[dayKey] || 0), 0),
-    );
-
-    const voiceSeries = board.dayKeys.map(dayKey =>
-      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.voiceSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2)),
-    );
-
-    const playtimeSeries = board.dayKeys.map(dayKey =>
-      Number((board.trackedUsers.reduce((sum, user) => sum + Number(user.starCitizenSeconds?.[dayKey] || 0), 0) / 3600).toFixed(2)),
-    );
-
-    const totalMessages = messagesSeries.reduce((sum, value) => sum + value, 0);
-    const totalVoiceSeconds = board.trackedUsers.reduce((sum, user) => sum + this.sumMap(user.voiceSeconds, board.dayKeys), 0);
-    const totalPlaytimeSeconds = board.trackedUsers.reduce((sum, user) => sum + this.sumMap(user.starCitizenSeconds, board.dayKeys), 0);
-
-    const embed = this.buildBaseStatsEmbed(
-      `Server Stats · Last ${days} Day${days === 1 ? '' : 's'}`,
-      days,
-      {
-        title: `Server Stats · Last ${days} Day${days === 1 ? '' : 's'}`,
-        labels,
-        messages: messagesSeries,
-        voiceHours: voiceSeries,
-        playtimeHours: playtimeSeries,
-      },
-    ).addFields(
-      {
-        name: 'Overview',
-        value: `\`\`\`\nMembers   | ${formatNumber(board.trackedUsers.length)}\nMessages  | ${formatNumber(totalMessages)}\nVC Hours  | ${(totalVoiceSeconds / 3600).toFixed(1)}h\nSC Hours  | ${(totalPlaytimeSeconds / 3600).toFixed(1)}h\n\`\`\``,
-        inline: false,
-      },
-      {
-        name: 'Top Messages',
-        value: this.formatTopThree(board.messages, 'messages'),
-        inline: true,
-      },
-      {
-        name: 'Top VC Hours',
-        value: this.formatTopThree(board.voice, 'voice'),
-        inline: true,
-      },
-      {
-        name: 'Top SC Hours',
-        value: this.formatTopThree(board.starCitizen, 'starCitizen'),
-        inline: true,
-      },
-    );
-
-    const components = [this.buildStatsControlRow('top', 'global', days, category, showTime)];
-    if (showTime) components.push(this.buildRangeButtons('top', 'global', days, category, true));
-
-    return { embeds: [embed], components };
-  }
-
-  buildUserStatsEmbed(userId, days = 7, showTime = false) {
-    const memberStillTracked = this.getTrackedMemberIds().has(userId);
-    const stats = this.getUserStats(userId, days);
-
-    if (!stats || !memberStillTracked) {
-      const components = [this.buildStatsControlRow('user', userId, days, 'overview', showTime)];
-      if (showTime) components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
-      return {
-        content: 'No tracked data for that user yet.',
-        embeds: [],
-        components,
-      };
-    }
-
-    const rankings = this.getUserRankings(userId, days);
-    const labels = stats.daily.map(day => day.label);
-    const messageValues = stats.daily.map(day => day.messages);
-    const voiceValues = stats.daily.map(day => day.voiceHours);
-    const playtimeValues = stats.daily.map(day => day.starCitizenHours);
-
-    const embed = this.buildBaseStatsEmbed(
-      `${stats.username} · Last ${days} Day${days === 1 ? '' : 's'}`,
-      days,
-      {
-        title: `${stats.username} · Last ${days} Day${days === 1 ? '' : 's'}`,
-        labels,
-        messages: messageValues,
-        voiceHours: voiceValues,
-        playtimeHours: playtimeValues,
-      },
-    ).addFields(
-      {
-        name: 'Summary',
-        value: `\`\`\`\nMessages  | ${formatNumber(stats.totals.messages)}\nVC Hours  | ${(stats.totals.voiceSeconds / 3600).toFixed(1)}h\nSC Hours  | ${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h\nVC Live   | ${formatSessionLength(stats.current.voiceStartedAt)}\nSC Live   | ${formatSessionLength(stats.current.starCitizenStartedAt)}\n\`\`\``,
-        inline: false,
-      },
-      {
-        name: 'Rank',
-        value: `\`\`\`\nMessages  | #${rankings.messages || '-'}\nVC Hours  | #${rankings.voice || '-'}\nSC Hours  | #${rankings.starCitizen || '-'}\nTracked   | ${formatNumber(rankings.totalTracked)}\n\`\`\``,
-        inline: true,
-      },
-      {
-        name: 'Top Messages',
-        value: this.formatTopThree(rankings.board.messages, 'messages'),
-        inline: true,
-      },
-      {
-        name: 'Top VC Hours',
-        value: this.formatTopThree(rankings.board.voice, 'voice'),
-        inline: true,
-      },
-      {
-        name: 'Top SC Hours',
-        value: this.formatTopThree(rankings.board.starCitizen, 'starCitizen'),
-        inline: true,
-      },
-    );
-
-    const components = [this.buildStatsControlRow('user', userId, days, 'overview', showTime)];
-    if (showTime) components.push(this.buildRangeButtons('user', userId, days, 'overview', true));
-
-    return { embeds: [embed], components };
-  }
-
-  buildPlayersEmbed(guild, days = 7, showTime = false) {
-    const current = this.getCurrentPlayers(guild);
-    const peak = this.getPeakForRange(days);
-    const dayKeys = this.getRangeDayKeys(days);
-    const labels = dayKeys.map(formatDisplayDate);
-    const playerSeries = dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0));
-
-    const embed = new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle(`Players · Last ${days} Day${days === 1 ? '' : 's'}`)
-      .setThumbnail(THUMBNAIL_URL)
-      .setImage(`https://quickchart.io/chart?width=1000&height=420&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify({
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            label: 'Peak Players',
-            data: playerSeries,
-            borderColor: COLORS.players,
-            backgroundColor: COLORS.players,
-            borderWidth: 3,
-            pointRadius: 2,
-            tension: 0.35,
-            fill: false,
-          }],
-        },
-        options: {
-          plugins: { title: { display: true, text: `Players · Last ${days} Day${days === 1 ? '' : 's'}` } },
-          scales: { y: { beginAtZero: true, title: { display: true, text: 'Players' } }, x: { grid: { display: false } } },
-        },
-      }))}`)
-      .addFields(
-        {
-          name: 'Overview',
-          value: `\`\`\`\nLive Now   | ${current.count}\nPeak       | ${peak.count || 0}\nPeak Time  | ${peak.ts ? new Date(peak.ts).toLocaleString('en-GB') : 'No data'}\n\`\`\``,
-          inline: false,
-        },
-        {
-          name: 'Current Players',
-          value: clampFieldText(current.players.length
-            ? `\`\`\`\n${current.players.slice(0, 12).map(player => `${player.name} | ${formatSessionLength(player.startedAt)}`).join('\n')}\n\`\`\``
-            : 'No one currently detected in Star Citizen.'),
-          inline: false,
-        },
-      );
-
-    const components = [this.buildStatsControlRow('players', guild?.id || 'global', days, 'overview', showTime)];
-    if (showTime) components.push(this.buildRangeButtons('players', guild?.id || 'global', days, 'overview', true));
-
-    return { embeds: [embed], components };
-  }
-
-  async handleSelectMenu() {
-    return null;
-  }
-
-  async handleButton(interaction) {
-    const decoded = decodeStatsButton(interaction.customId);
-    if (!decoded) return null;
-
-    if (decoded.mode === 'legacy') {
-      if (decoded.panel === 'top') return interaction.editReply(this.buildTopEmbed(decoded.days, 'overview', false));
-      if (decoded.panel === 'user') return interaction.editReply(this.buildUserStatsEmbed(decoded.targetId, decoded.days, false));
-      if (decoded.panel === 'players') return interaction.editReply(this.buildPlayersEmbed(interaction.guild, decoded.days, false));
-      return null;
-    }
-
-    const { action, panel, targetId, days, category, showTime } = decoded;
+    const nextState = { ...state };
+    const currentBudget = state.budget || 100000;
+    const step = getBudgetStep(currentBudget);
 
     if (action === 'refresh') {
-      if (panel === 'top') return interaction.editReply(this.buildTopEmbed(days, category, showTime));
-      if (panel === 'user') return interaction.editReply(this.buildUserStatsEmbed(targetId, days, showTime));
-      if (panel === 'players') return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, showTime));
-      return null;
+      nextState.previousSignature = state.previousSignature || null;
+    } else if (action === 'invest_up') {
+      nextState.budget = Math.max(1, currentBudget + step);
+      nextState.previousSignature = null;
+    } else if (action === 'invest_down') {
+      nextState.budget = Math.max(1, currentBudget - step);
+      nextState.previousSignature = null;
     }
 
-    if (action === 'time') {
-      const nextShowTime = !showTime;
-      if (panel === 'top') return interaction.editReply(this.buildTopEmbed(days, category, nextShowTime));
-      if (panel === 'user') return interaction.editReply(this.buildUserStatsEmbed(targetId, days, nextShowTime));
-      if (panel === 'players') return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, nextShowTime));
-      return null;
-    }
+    const response = await buildRouteResponse(nextState, stateId);
 
-    if (action === 'range') {
-      if (panel === 'top') return interaction.editReply(this.buildTopEmbed(days, category, true));
-      if (panel === 'user') return interaction.editReply(this.buildUserStatsEmbed(targetId, days, true));
-      if (panel === 'players') return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, true));
-      return null;
-    }
-
-    return null;
+    await interaction.editReply({
+      content: response.content ?? undefined,
+      embeds: response.embeds,
+      components: response.components,
+    });
+  } finally {
+    activeMessageLocks.delete(lockKey);
   }
 }
 
-module.exports = {
-  StatsTracker,
-};
+client.once(Events.ClientReady, async readyClient => {
+  loadStateStoreFromDisk();
+  await ensureShipData(false);
+
+  for (const guild of readyClient.guilds.cache.values()) {
+    await tracker.hydrateGuild(guild);
+  }
+
+  await markStartupState();
+  console.log(`Logged in as ${readyClient.user.tag}`);
+});
+
+client.on(Events.InteractionCreate, async interaction => {
+  if (interaction.isAutocomplete()) {
+    try {
+      await handleAutocomplete(interaction);
+    } catch (error) {
+      console.error('Autocomplete error:', error);
+      void sendAlert({
+        code: 'AUTOCOMPLETE_ERROR',
+        summary: 'Autocomplete failed.',
+        details: `${interaction.commandName || 'unknown'} autocomplete could not be processed.`,
+        error,
+      });
+      try {
+        await interaction.respond([]);
+      } catch {}
+    }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu()) {
+    try {
+      if (typeof tracker.handleSelectMenu === 'function') {
+        await interaction.deferUpdate();
+        await tracker.handleSelectMenu(interaction);
+        return;
+      }
+
+      await interaction.reply({
+        content: 'That stats menu is not available yet.',
+        ephemeral: true,
+      });
+    } catch (error) {
+      console.error('Select menu error:', error);
+      void sendAlert({
+        code: 'SELECT_MENU_ERROR',
+        summary: 'A select menu interaction failed.',
+        details: `Custom ID: ${interaction.customId}`,
+        error,
+      });
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({
+            content: 'Could not update that panel.',
+            ephemeral: true,
+          });
+        } else {
+          await interaction.followUp({
+            content: 'Could not update that panel.',
+            ephemeral: true,
+          });
+        }
+      } catch {}
+    }
+    return;
+  }
+
+  if (interaction.isButton()) {
+    const parts = interaction.customId.split(':');
+
+    try {
+      await interaction.deferUpdate();
+
+      if (parts[0] === 'route') {
+        await handleRouteButton(interaction, parts[1], parts[2]);
+        return;
+      }
+
+      if (parts[0] === 'stats') {
+        await tracker.handleButton(interaction);
+        return;
+      }
+    } catch (error) {
+      console.error('Button error:', error);
+      void sendAlert({
+        code: 'BUTTON_ERROR',
+        summary: 'A button interaction failed.',
+        details: `Custom ID: ${interaction.customId}`,
+        error,
+      });
+      try {
+        await interaction.followUp({
+          content: 'Could not update that panel.',
+          ephemeral: true,
+        });
+      } catch {}
+    }
+    return;
+  }
+
+  if (!interaction.isChatInputCommand()) return;
+
+  try {
+    if (interaction.commandName === 'ping') {
+      await interaction.reply('Pong!');
+      return;
+    }
+
+    if (interaction.commandName === 'route') {
+      await interaction.deferReply();
+
+      const response = await buildRouteResponse({
+        shipName: interaction.options.getString('ship', true),
+        cargo: interaction.options.getInteger('cargo'),
+        budget: interaction.options.getInteger('budget'),
+        location: interaction.options.getString('location'),
+        finish: interaction.options.getString('finish'),
+      });
+
+      await interaction.editReply({
+        content: response.content ?? undefined,
+        embeds: response.embeds,
+        components: response.components,
+      });
+      return;
+    }
+
+    if (interaction.commandName === 'best-routes') {
+      await interaction.deferReply();
+      await ensureShipData(false);
+
+      const shipName = interaction.options.getString('ship', true);
+      const ship = getShipProfile(shipName);
+
+      if (!ship) {
+        await interaction.editReply({ content: 'Invalid ship.' });
+        return;
+      }
+
+      const locationInput = interaction.options.getString('location');
+      const finishInput = interaction.options.getString('finish');
+      const lines = [];
+
+      for (const bracket of getBracketCaps()) {
+        const result = await findBestRoute({
+          shipName,
+          cargo: Math.min(bracket.cargo, ship.cargo),
+          location: locationInput || null,
+          finish: finishInput || null,
+          budget: null,
+        });
+
+        if (!result.route) {
+          lines.push(`**${bracket.name}** — no route found`);
+          continue;
+        }
+
+        lines.push(
+          `**${bracket.name}** — ${result.route.commodity}\n` +
+          `${result.route.buyShortGroup} → ${result.route.sellShortGroup}\n` +
+          `${result.route.totalProfit.toLocaleString()} aUEC | ROI ${result.route.profitPercent.toFixed(1)}% | ${result.route.time.label}`
+        );
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x38bdf8)
+        .setTitle(`Best routes by cargo bracket for ${ship.name}`)
+        .setDescription(lines.join('\n\n'))
+        .setThumbnail(EMBED_THUMBNAIL_URL)
+        .setImage(EMBED_BANNER_URL)
+        .addFields(
+          { name: 'Start', value: locationInput || 'Any', inline: true },
+          { name: 'Finish', value: finishInput || 'Any', inline: true },
+          { name: 'Ship Cargo', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
+        )
+        .setFooter({
+          text: `SPACEWHLE Trade Command • bracket summary • ${getShipSourceLabel()}`,
+        });
+
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+
+    if (interaction.commandName === 'location') {
+      await interaction.deferReply();
+      await loadMarketData(false);
+
+      const locationInput = interaction.options.getString('location', true);
+      const group = findMatchingGroup(locationInput);
+
+      if (!group) {
+        await interaction.editReply({ content: 'I could not find that location.' });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x60a5fa)
+        .setTitle(group.shortName)
+        .setDescription(`Type: **${group.locationType}** | System: **${group.system}**`)
+        .setThumbnail(EMBED_THUMBNAIL_URL)
+        .setImage(EMBED_BANNER_URL)
+        .addFields(
+          {
+            name: `Commodity Shops (${group.terminals.length})`,
+            value: group.terminals.map(t => `• ${t.name}`).join('\n').slice(0, 1024) || 'None',
+            inline: false,
+          },
+          {
+            name: 'Sells by Shop',
+            value: formatSellListByTerminal(group.terminals).slice(0, 1024),
+            inline: false,
+          },
+          {
+            name: 'Buys by Shop',
+            value: formatBuyListByTerminal(group.terminals).slice(0, 1024),
+            inline: false,
+          },
+        )
+        .setFooter({
+          text: 'SPACEWHLE Trade Command • grouped location view',
+        });
+
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+
+    if (interaction.commandName === 'buyers') {
+      await interaction.deferReply();
+      await loadMarketData(false);
+
+      const commodityInput = interaction.options.getString('commodity', true);
+      const amountInput = interaction.options.getInteger('amount');
+      const locationInput = interaction.options.getString('location');
+
+      const buyers = filterBuyersForCommodity(commodityInput, locationInput)
+        .map(buyer => {
+          const sellableAmount = amountInput
+            ? (buyer.demand > 0 ? Math.min(amountInput, buyer.demand) : amountInput)
+            : (buyer.demand > 0 ? buyer.demand : null);
+
+          return {
+            ...buyer,
+            sellableAmount,
+            totalValue: amountInput ? buyer.price * (sellableAmount || amountInput) : null,
+          };
+        })
+        .sort((a, b) => {
+          if (amountInput) return (b.totalValue || 0) - (a.totalValue || 0);
+          return b.price - a.price;
+        })
+        .slice(0, 5);
+
+      if (!buyers.length) {
+        await interaction.editReply({ content: 'No buyers found for that commodity and location filter.' });
+        return;
+      }
+
+      const lines = buyers.map((buyer, index) => {
+        const extra = amountInput
+          ? ` | Sellable: ${buyer.sellableAmount ?? amountInput} SCU | Total: ${(buyer.totalValue || 0).toLocaleString()} aUEC`
+          : ` | Demand: ${buyer.demand || 'Unknown'} SCU`;
+
+        return `**${index + 1}. ${buyer.shortGroupName}**\n${buyer.terminalName}\n${buyer.price.toLocaleString()} aUEC / SCU${extra}`;
+      }).join('\n\n');
+
+      const embed = new EmbedBuilder()
+        .setColor(0xf59e0b)
+        .setTitle(`Best buyers for ${commodityInput}`)
+        .setDescription(lines)
+        .setThumbnail(EMBED_THUMBNAIL_URL)
+        .setImage(EMBED_BANNER_URL)
+        .addFields(
+          { name: 'Commodity', value: commodityInput, inline: true },
+          { name: 'Amount', value: amountInput ? `${amountInput.toLocaleString()} SCU` : 'Not set', inline: true },
+          { name: 'Location Filter', value: locationInput || 'None', inline: true },
+        )
+        .setFooter({
+          text: 'SPACEWHLE Trade Command • top 5 buyers',
+        });
+
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+
+    if (interaction.commandName === 'players') {
+      await interaction.deferReply();
+      await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
+      return;
+    }
+
+    if (interaction.commandName === 'top') {
+      await interaction.deferReply();
+      await interaction.editReply(tracker.buildTopEmbed(7));
+      return;
+    }
+
+    if (interaction.commandName === 'stats') {
+      await interaction.deferReply();
+      const user = interaction.options.getUser('user', true);
+      await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+      return;
+    }
+
+    if (interaction.commandName === 'ship') {
+      await interaction.deferReply();
+      await ensureShipData(false);
+      const shipName = interaction.options.getString('ship', true);
+      const ship = getShipProfile(shipName);
+
+      if (!ship) {
+        await interaction.editReply({ content: 'I could not find that ship.' });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x8b5cf6)
+        .setTitle(ship.name)
+        .setThumbnail(EMBED_THUMBNAIL_URL)
+        .addFields(
+          { name: 'Cargo capacity', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
+          { name: 'Military hull', value: ship.military ? 'Yes' : 'No', inline: true },
+          { name: 'Cargo tier', value: ship.cargoTier, inline: true },
+          { name: 'Ship data source', value: getShipSourceLabel(), inline: false },
+        )
+        .setFooter({ text: 'Live pull attempted first, then fallback ship data.' });
+
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+  } catch (error) {
+    console.error('Interaction error:', error);
+    void sendAlert({
+      code: 'COMMAND_ERROR',
+      summary: 'A slash command failed.',
+      details: `Command: ${interaction.commandName}`,
+      error,
+    });
+
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({
+          content: 'Something went wrong.',
+          embeds: [],
+          components: [],
+        });
+      } else {
+        await interaction.reply({
+          content: 'Something went wrong.',
+          ephemeral: true,
+        });
+      }
+    } catch (replyError) {
+      console.error('Reply error:', replyError);
+    }
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
