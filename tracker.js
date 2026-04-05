@@ -6,6 +6,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  StringSelectMenuBuilder,
 } = require('discord.js');
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
@@ -122,12 +123,25 @@ function parseLegacyDays(customId, fallback = 7) {
   return [1, 7, 14, 30].includes(parsed) ? parsed : fallback;
 }
 
-function encodeStatsButton(action, panel, targetId, days, category = 'overview', showTime = false) {
-  return `stats:${action}:${panel}:${targetId || 'global'}:${days}:${category}:${showTime ? 1 : 0}`;
+function encodeStatsButton(action, panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false) {
+  return `stats:${action}:${panel}:${targetId || 'global'}:${days}:${category}:${showTime ? 1 : 0}:${graphMenuEnabled ? 1 : 0}`;
 }
 
 function decodeStatsButton(customId) {
   const parts = String(customId || '').split(':');
+
+  if (parts.length >= 8 && parts[0] === 'stats') {
+    return {
+      mode: 'modern',
+      action: parts[1],
+      panel: parts[2],
+      targetId: parts[3],
+      days: [1, 7, 14, 30].includes(Number(parts[4])) ? Number(parts[4]) : 7,
+      category: parts[5] || 'overview',
+      showTime: parts[6] === '1',
+      graphMenuEnabled: parts[7] === '1',
+    };
+  }
 
   if (parts.length >= 7 && parts[0] === 'stats') {
     return {
@@ -138,6 +152,7 @@ function decodeStatsButton(customId) {
       days: [1, 7, 14, 30].includes(Number(parts[4])) ? Number(parts[4]) : 7,
       category: parts[5] || 'overview',
       showTime: parts[6] === '1',
+      graphMenuEnabled: false,
     };
   }
 
@@ -150,6 +165,28 @@ function decodeStatsButton(customId) {
       days: parseLegacyDays(customId, 7),
       category: 'overview',
       showTime: false,
+      graphMenuEnabled: false,
+    };
+  }
+
+  return null;
+}
+
+function encodeStatsSelectMenu(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false) {
+  return `statsmenu:${panel}:${targetId || 'global'}:${days}:${category}:${showTime ? 1 : 0}:${graphMenuEnabled ? 1 : 0}`;
+}
+
+function decodeStatsSelectMenu(customId) {
+  const parts = String(customId || '').split(':');
+
+  if (parts.length >= 7 && parts[0] === 'statsmenu') {
+    return {
+      panel: parts[1],
+      targetId: parts[2],
+      days: [1, 7, 14, 30].includes(Number(parts[3])) ? Number(parts[3]) : 7,
+      category: parts[4] || 'overview',
+      showTime: parts[5] === '1',
+      graphMenuEnabled: parts[6] === '1',
     };
   }
 
@@ -984,6 +1021,518 @@ class StatsTracker {
       if (panel === 'user') return interaction.editReply(this.buildUserStatsEmbed(targetId, days, true));
       if (panel === 'players') return interaction.editReply(this.buildPlayersEmbed(interaction.guild, days, true));
       return null;
+    }
+
+    return null;
+  }
+
+  getAllowedCategories(panel) {
+    if (panel === 'players') return ['overview', 'players'];
+    return ['overview', 'messages', 'voice', 'starCitizen'];
+  }
+
+  normalizeCategory(panel, category, graphMenuEnabled = false) {
+    if (!graphMenuEnabled) return 'overview';
+    return this.getAllowedCategories(panel).includes(category) ? category : 'overview';
+  }
+
+  getMetricConfig(category) {
+    const configs = {
+      messages: {
+        label: 'Messages',
+        axisTitle: 'Messages',
+        color: '#60a5fa',
+        fillColor: 'rgba(96, 165, 250, 0.18)',
+        getLeaderboardValue: row => Number(row.messages || 0),
+        getDailyValue: day => Number(day.messages || 0),
+        formatValue: value => `${formatNumber(value)} message${Number(value) === 1 ? '' : 's'}`,
+      },
+      voice: {
+        label: 'VC Hours',
+        axisTitle: 'Hours',
+        color: '#34d399',
+        fillColor: 'rgba(52, 211, 153, 0.18)',
+        getLeaderboardValue: row => Number((Number(row.voiceSeconds || 0) / 3600).toFixed(2)),
+        getDailyValue: day => Number(day.voiceHours || 0),
+        formatValue: value => `${Number(value || 0).toFixed(1)} hours`,
+      },
+      starCitizen: {
+        label: 'SC Hours',
+        axisTitle: 'Hours',
+        color: '#f59e0b',
+        fillColor: 'rgba(245, 158, 11, 0.18)',
+        getLeaderboardValue: row => Number((Number(row.starCitizenSeconds || 0) / 3600).toFixed(2)),
+        getDailyValue: day => Number(day.starCitizenHours || 0),
+        formatValue: value => `${Number(value || 0).toFixed(1)} hours`,
+      },
+      players: {
+        label: 'Player Peaks',
+        axisTitle: 'Players',
+        color: '#a78bfa',
+        fillColor: 'rgba(167, 139, 250, 0.18)',
+        getLeaderboardValue: row => Number(row.players || 0),
+        getDailyValue: day => Number(day.players || 0),
+        formatValue: value => `${formatNumber(value)} player${Number(value) === 1 ? '' : 's'}`,
+      },
+    };
+
+    return configs[category] || null;
+  }
+
+  getBoardRows(board, category) {
+    if (category === 'messages') return board.messages;
+    if (category === 'voice') return board.voice;
+    if (category === 'starCitizen') return board.starCitizen;
+    return [];
+  }
+
+  formatBubbleSummary(items) {
+    return clampFieldText(
+      items
+        .filter(item => item && item.label)
+        .map(item => `\`${item.label}\` **${item.value}**`)
+        .join('\n'),
+    );
+  }
+
+  formatLeaderboardBubble(rows, category, limit = 5) {
+    const metric = this.getMetricConfig(category);
+    const top = rows.slice(0, limit);
+    if (!metric || !top.length) return 'No data yet.';
+
+    return clampFieldText(
+      top
+        .map((row, index) => {
+          const value = metric.formatValue(metric.getLeaderboardValue(row));
+          return `**${index + 1}. ${row.username}**\n\`${value}\``;
+        })
+        .join('\n\n'),
+    );
+  }
+
+  buildStatsControlRow(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory(panel, category, graphMenuEnabled);
+
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(encodeStatsButton('refresh', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
+        .setLabel('Refresh')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(encodeStatsButton('time', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
+        .setLabel('Days')
+        .setStyle(showTime ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(encodeStatsButton('graph', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
+        .setEmoji('\u{1F4CA}')
+        .setStyle(graphMenuEnabled ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    );
+  }
+
+  buildRangeButtons(panel, targetId, days, category = 'overview', showTime = true, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory(panel, category, graphMenuEnabled);
+    const ranges = [1, 7, 14, 30];
+
+    return new ActionRowBuilder().addComponents(
+      ...ranges.map(range =>
+        new ButtonBuilder()
+          .setCustomId(encodeStatsButton('range', panel, targetId, range, activeCategory, showTime, graphMenuEnabled))
+          .setLabel(`${range}d`)
+          .setStyle(range === days ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      ),
+    );
+  }
+
+  buildCategorySelectRow(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory(panel, category, graphMenuEnabled);
+    const options = panel === 'players'
+      ? [
+          {
+            label: 'Overview',
+            value: 'overview',
+            description: 'Show the live and recent player summary.',
+            default: activeCategory === 'overview',
+          },
+          {
+            label: 'Players Graph',
+            value: 'players',
+            description: 'Show the peak player chart for the range.',
+            default: activeCategory === 'players',
+          },
+        ]
+      : [
+          {
+            label: 'Overview',
+            value: 'overview',
+            description: panel === 'top' ? 'Show the leaderboard overview cards.' : 'Show this member summary only.',
+            default: activeCategory === 'overview',
+          },
+          {
+            label: 'Messages Graph',
+            value: 'messages',
+            description: panel === 'top' ? 'Compare top users by messages.' : 'Show this member daily messages.',
+            default: activeCategory === 'messages',
+          },
+          {
+            label: 'VC Hours Graph',
+            value: 'voice',
+            description: panel === 'top' ? 'Compare top users by VC hours.' : 'Show this member daily VC hours.',
+            default: activeCategory === 'voice',
+          },
+          {
+            label: 'SC Hours Graph',
+            value: 'starCitizen',
+            description: panel === 'top' ? 'Compare top users by SC hours.' : 'Show this member daily SC hours.',
+            default: activeCategory === 'starCitizen',
+          },
+        ];
+
+    return new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(encodeStatsSelectMenu(panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
+        .setPlaceholder(
+          graphMenuEnabled
+            ? 'Switch between overview and graph views'
+            : 'Press the graph button to unlock graphs',
+        )
+        .setMinValues(1)
+        .setMaxValues(1)
+        .setDisabled(!graphMenuEnabled)
+        .addOptions(options),
+    );
+  }
+
+  buildLeaderboardChartUrl({ labels, values, label, color, axisTitle }) {
+    const config = {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label,
+            data: values,
+            backgroundColor: color,
+            borderColor: color,
+            borderWidth: 1,
+            borderRadius: 14,
+            borderSkipped: false,
+            maxBarThickness: 30,
+          },
+        ],
+      },
+      options: {
+        indexAxis: 'y',
+        layout: { padding: 16 },
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { beginAtZero: true, title: { display: true, text: axisTitle } },
+          y: { grid: { display: false } },
+        },
+      },
+    };
+
+    return `https://quickchart.io/chart?width=1000&height=460&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+  }
+
+  buildTrendChartUrl({ labels, values, label, color, fillColor, axisTitle }) {
+    const config = {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label,
+            data: values,
+            borderColor: color,
+            backgroundColor: fillColor,
+            fill: true,
+            pointBackgroundColor: color,
+            pointBorderColor: color,
+            pointRadius: 3,
+            tension: 0.35,
+          },
+        ],
+      },
+      options: {
+        layout: { padding: 16 },
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, title: { display: true, text: axisTitle } },
+        },
+      },
+    };
+
+    return `https://quickchart.io/chart?width=1000&height=460&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+  }
+
+  buildBaseEmbed(title) {
+    return new EmbedBuilder().setColor(0x5865f2).setTitle(title).setThumbnail(THUMBNAIL_URL);
+  }
+
+  buildTopEmbed(days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory('top', category, graphMenuEnabled);
+    const board = this.getLeaderboard(days);
+
+    const totalMessages = board.all.reduce((sum, row) => sum + Number(row.messages || 0), 0);
+    const totalVoiceHours = board.all.reduce((sum, row) => sum + Number(row.voiceSeconds || 0), 0) / 3600;
+    const totalPlaytimeHours = board.all.reduce((sum, row) => sum + Number(row.starCitizenSeconds || 0), 0) / 3600;
+
+    const embed = this.buildBaseEmbed(`Server Stats - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription(
+        activeCategory === 'overview'
+          ? 'Overview cards are shown by default. Use the graph button below when you want a chart.'
+          : `Showing the ${this.getMetricConfig(activeCategory)?.label.toLowerCase()} graph for this range.`,
+      )
+      .addFields({
+        name: 'Overview',
+        value: this.formatBubbleSummary([
+          { label: 'Tracked Members', value: formatNumber(board.trackedUsers.length) },
+          { label: 'Messages', value: formatNumber(totalMessages) },
+          { label: 'VC Hours', value: `${totalVoiceHours.toFixed(1)} hours` },
+          { label: 'SC Hours', value: `${totalPlaytimeHours.toFixed(1)} hours` },
+        ]),
+        inline: false,
+      });
+
+    if (activeCategory === 'overview') {
+      embed.addFields(
+        { name: 'Messages', value: this.formatLeaderboardBubble(board.messages, 'messages'), inline: true },
+        { name: 'VC Hours', value: this.formatLeaderboardBubble(board.voice, 'voice'), inline: true },
+        { name: 'SC Hours', value: this.formatLeaderboardBubble(board.starCitizen, 'starCitizen'), inline: true },
+      );
+    } else {
+      const metric = this.getMetricConfig(activeCategory);
+      const chartRows = this.getBoardRows(board, activeCategory).slice(0, 8);
+
+      if (chartRows.length) {
+        embed.setImage(this.buildLeaderboardChartUrl({
+          labels: chartRows.map(row => row.username),
+          values: chartRows.map(row => metric.getLeaderboardValue(row)),
+          label: metric.label,
+          color: metric.color,
+          axisTitle: metric.axisTitle,
+        }));
+      }
+
+      embed.addFields({
+        name: `${metric.label} Leaders`,
+        value: this.formatLeaderboardBubble(chartRows, activeCategory, 8),
+        inline: false,
+      });
+    }
+
+    const components = [this.buildStatsControlRow('top', 'global', days, activeCategory, showTime, graphMenuEnabled)];
+    if (showTime) components.push(this.buildRangeButtons('top', 'global', days, activeCategory, true, graphMenuEnabled));
+    components.push(this.buildCategorySelectRow('top', 'global', days, activeCategory, showTime, graphMenuEnabled));
+
+    return { embeds: [embed], components };
+  }
+
+  buildUserStatsEmbed(userId, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory('user', category, graphMenuEnabled);
+    const memberStillTracked = this.getTrackedMemberIds().has(userId);
+    const stats = this.getUserStats(userId, days);
+
+    const components = [this.buildStatsControlRow('user', userId, days, activeCategory, showTime, graphMenuEnabled)];
+    if (showTime) components.push(this.buildRangeButtons('user', userId, days, activeCategory, true, graphMenuEnabled));
+    components.push(this.buildCategorySelectRow('user', userId, days, activeCategory, showTime, graphMenuEnabled));
+
+    if (!stats || !memberStillTracked) {
+      return {
+        content: 'No tracked data for that user yet.',
+        embeds: [],
+        components,
+      };
+    }
+
+    const rankings = this.getUserRankings(userId, days);
+    const embed = this.buildBaseEmbed(`${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription(
+        activeCategory === 'overview'
+          ? 'Only this member has been shown here.'
+          : `Showing only ${stats.username}'s ${this.getMetricConfig(activeCategory)?.label.toLowerCase()} trend.`,
+      )
+      .addFields(
+        {
+          name: 'Summary',
+          value: this.formatBubbleSummary([
+            { label: 'Messages', value: formatNumber(stats.totals.messages) },
+            { label: 'VC Hours', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)} hours` },
+            { label: 'SC Hours', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)} hours` },
+            { label: 'VC Live', value: formatSessionLength(stats.current.voiceStartedAt) },
+            { label: 'SC Live', value: formatSessionLength(stats.current.starCitizenStartedAt) },
+          ]),
+          inline: false,
+        },
+        {
+          name: 'Rank',
+          value: this.formatBubbleSummary([
+            { label: 'Messages', value: `#${rankings.messages || '-'}` },
+            { label: 'VC Hours', value: `#${rankings.voice || '-'}` },
+            { label: 'SC Hours', value: `#${rankings.starCitizen || '-'}` },
+            { label: 'Tracked', value: formatNumber(rankings.totalTracked) },
+          ]),
+          inline: false,
+        },
+      );
+
+    if (activeCategory !== 'overview') {
+      const metric = this.getMetricConfig(activeCategory);
+      const labels = stats.daily.map(day => day.label);
+      const values = stats.daily.map(day => metric.getDailyValue(day));
+
+      if (labels.length) {
+        embed.setImage(this.buildTrendChartUrl({
+          labels,
+          values,
+          label: metric.label,
+          color: metric.color,
+          fillColor: metric.fillColor,
+          axisTitle: metric.axisTitle,
+        }));
+      }
+    }
+
+    return { embeds: [embed], components };
+  }
+
+  buildPlayersEmbed(guild, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory('players', category, graphMenuEnabled);
+    const current = this.getCurrentPlayers(guild);
+    const peak = this.getPeakForRange(days);
+    const dayKeys = this.getRangeDayKeys(days);
+    const labels = dayKeys.map(formatDisplayDate);
+    const playerSeries = dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0));
+
+    const currentPlayers = current.players.length
+      ? clampFieldText(
+          current.players
+            .slice(0, 12)
+            .map(player => `**${player.name}**\n\`${formatSessionLength(player.startedAt)} live\``)
+            .join('\n\n'),
+        )
+      : 'No one currently detected in Star Citizen.';
+
+    const embed = this.buildBaseEmbed(`Players - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription(
+        activeCategory === 'overview'
+          ? 'Live player info is shown by default.'
+          : 'Showing the player peak graph for this range.',
+      )
+      .addFields(
+        {
+          name: 'Overview',
+          value: this.formatBubbleSummary([
+            { label: 'Live Now', value: formatNumber(current.count) },
+            { label: 'Peak', value: formatNumber(peak.count || 0) },
+            { label: 'Peak Time', value: peak.ts ? new Date(peak.ts).toLocaleString('en-GB') : 'No data' },
+          ]),
+          inline: false,
+        },
+        {
+          name: 'Current Players',
+          value: currentPlayers,
+          inline: false,
+        },
+      );
+
+    if (activeCategory === 'players' && labels.length) {
+      const metric = this.getMetricConfig('players');
+      embed.setImage(this.buildTrendChartUrl({
+        labels,
+        values: playerSeries,
+        label: metric.label,
+        color: metric.color,
+        fillColor: metric.fillColor,
+        axisTitle: metric.axisTitle,
+      }));
+    }
+
+    const components = [this.buildStatsControlRow('players', guild?.id || 'global', days, activeCategory, showTime, graphMenuEnabled)];
+    if (showTime) components.push(this.buildRangeButtons('players', guild?.id || 'global', days, activeCategory, true, graphMenuEnabled));
+    components.push(this.buildCategorySelectRow('players', guild?.id || 'global', days, activeCategory, showTime, graphMenuEnabled));
+
+    return { embeds: [embed], components };
+  }
+
+  buildPanel(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false, guild = null) {
+    if (panel === 'top') return this.buildTopEmbed(days, category, showTime, graphMenuEnabled);
+    if (panel === 'user') return this.buildUserStatsEmbed(targetId, days, category, showTime, graphMenuEnabled);
+    if (panel === 'players') return this.buildPlayersEmbed(guild, days, category, showTime, graphMenuEnabled);
+    return null;
+  }
+
+  async handleSelectMenu(interaction) {
+    const decoded = decodeStatsSelectMenu(interaction.customId);
+    if (!decoded) return null;
+
+    const selectedCategory = this.getAllowedCategories(decoded.panel).includes(interaction.values?.[0])
+      ? interaction.values[0]
+      : 'overview';
+
+    const nextGraphMenuEnabled = decoded.graphMenuEnabled || selectedCategory !== 'overview';
+
+    return interaction.editReply(
+      this.buildPanel(
+        decoded.panel,
+        decoded.targetId,
+        decoded.days,
+        selectedCategory,
+        decoded.showTime,
+        nextGraphMenuEnabled,
+        interaction.guild,
+      ),
+    );
+  }
+
+  async handleButton(interaction) {
+    const decoded = decodeStatsButton(interaction.customId);
+    if (!decoded) return null;
+
+    if (decoded.mode === 'legacy') {
+      return interaction.editReply(
+        this.buildPanel(decoded.panel, decoded.targetId, decoded.days, 'overview', false, false, interaction.guild),
+      );
+    }
+
+    const {
+      action,
+      panel,
+      targetId,
+      days,
+      category,
+      showTime,
+      graphMenuEnabled,
+    } = decoded;
+
+    const activeCategory = this.normalizeCategory(panel, category, graphMenuEnabled);
+
+    if (action === 'refresh') {
+      return interaction.editReply(
+        this.buildPanel(panel, targetId, days, activeCategory, showTime, graphMenuEnabled, interaction.guild),
+      );
+    }
+
+    if (action === 'time') {
+      return interaction.editReply(
+        this.buildPanel(panel, targetId, days, activeCategory, !showTime, graphMenuEnabled, interaction.guild),
+      );
+    }
+
+    if (action === 'graph') {
+      const nextGraphMenuEnabled = !graphMenuEnabled;
+      const nextCategory = nextGraphMenuEnabled ? activeCategory : 'overview';
+
+      return interaction.editReply(
+        this.buildPanel(panel, targetId, days, nextCategory, showTime, nextGraphMenuEnabled, interaction.guild),
+      );
+    }
+
+    if (action === 'range') {
+      return interaction.editReply(
+        this.buildPanel(panel, targetId, days, activeCategory, true, graphMenuEnabled, interaction.guild),
+      );
     }
 
     return null;
