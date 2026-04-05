@@ -1434,10 +1434,25 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'stats') {
       await interaction.deferReply();
-      if (interaction.options.getSubcommand(false) === 'user') {
-        const user = interaction.options.getUser('user', true);
+      const subcommand = interaction.options.getSubcommand(false);
+      const user = interaction.options.getUser('user', false);
+
+      if (subcommand === 'user' && user) {
         await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+        return;
       }
+
+      if (!subcommand && user) {
+        await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+        return;
+      }
+
+      await interaction.editReply({
+        content: 'Use `/stats user @member` to view a tracked member profile.',
+        embeds: [],
+        components: [],
+        attachments: [],
+      });
       return;
     }
 
