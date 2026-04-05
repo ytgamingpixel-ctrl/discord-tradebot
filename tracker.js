@@ -16,6 +16,13 @@ const STAR_CITIZEN_MATCH = /star\s*citizen/i;
 const THUMBNAIL_URL = 'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
 const TRACKED_ROLE_NAME = (process.env.TRACKED_ROLE_NAME || 'SPACEWHLE').replace(/^@/, '').trim();
 const TRACKED_ROLE_ID = process.env.TRACKED_ROLE_ID || null;
+const CHART_BG = '#2f3136';
+const CHART_TITLE = '#f5f50a';
+const CHART_AXIS = '#3b82f6';
+const CHART_LABELS = '#ef4444';
+const CHART_DATA = '#22c55e';
+const CHART_FILL = 'rgba(34, 197, 94, 0.22)';
+const CHART_GRID = '#4b5563';
 
 function safeReadJson(filePath, fallback) {
   try {
@@ -1253,8 +1260,8 @@ class StatsTracker {
           {
             label,
             data: values,
-            backgroundColor: color,
-            borderColor: color,
+            backgroundColor: CHART_DATA,
+            borderColor: CHART_DATA,
             borderWidth: 1,
             borderRadius: 14,
             borderSkipped: false,
@@ -1270,7 +1277,7 @@ class StatsTracker {
           title: {
             display: true,
             text: label,
-            color: '#111827',
+            color: CHART_TITLE,
             font: { size: 22, weight: 'bold' },
             padding: { bottom: 18 },
           },
@@ -1278,22 +1285,22 @@ class StatsTracker {
         scales: {
           x: {
             beginAtZero: true,
-            grid: { color: '#d1d5db' },
+            grid: { color: CHART_GRID },
             ticks: {
-              color: '#111827',
+              color: CHART_AXIS,
               font: { size: 16, weight: 'bold' },
             },
             title: {
               display: true,
               text: axisTitle,
-              color: '#111827',
+              color: CHART_AXIS,
               font: { size: 18, weight: 'bold' },
             },
           },
           y: {
             grid: { display: false },
             ticks: {
-              color: '#111827',
+              color: CHART_LABELS,
               font: { size: 17, weight: 'bold' },
             },
           },
@@ -1301,7 +1308,7 @@ class StatsTracker {
       },
     };
 
-    return `https://quickchart.io/chart?width=1200&height=560&devicePixelRatio=2&backgroundColor=%23f3f4f6&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+    return `https://quickchart.io/chart?width=1200&height=560&devicePixelRatio=2&backgroundColor=${encodeURIComponent(CHART_BG)}&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
   }
 
   buildTrendChartUrl({ labels, values, label, color, fillColor, axisTitle }) {
@@ -1313,11 +1320,11 @@ class StatsTracker {
           {
             label,
             data: values,
-            borderColor: color,
-            backgroundColor: fillColor,
+            borderColor: CHART_DATA,
+            backgroundColor: CHART_FILL,
             fill: true,
-            pointBackgroundColor: color,
-            pointBorderColor: color,
+            pointBackgroundColor: CHART_DATA,
+            pointBorderColor: CHART_DATA,
             pointRadius: 5,
             pointHoverRadius: 6,
             borderWidth: 4,
@@ -1332,31 +1339,31 @@ class StatsTracker {
           title: {
             display: true,
             text: label,
-            color: '#111827',
+            color: CHART_TITLE,
             font: { size: 22, weight: 'bold' },
             padding: { bottom: 18 },
           },
         },
         scales: {
           x: {
-            grid: { color: '#d1d5db' },
+            grid: { color: CHART_GRID },
             ticks: {
-              color: '#111827',
+              color: CHART_LABELS,
               font: { size: 16, weight: 'bold' },
               maxRotation: 0,
             },
           },
           y: {
             beginAtZero: true,
-            grid: { color: '#d1d5db' },
+            grid: { color: CHART_GRID },
             ticks: {
-              color: '#111827',
+              color: CHART_AXIS,
               font: { size: 16, weight: 'bold' },
             },
             title: {
               display: true,
               text: axisTitle,
-              color: '#111827',
+              color: CHART_AXIS,
               font: { size: 18, weight: 'bold' },
             },
           },
@@ -1364,7 +1371,7 @@ class StatsTracker {
       },
     };
 
-    return `https://quickchart.io/chart?width=1200&height=560&devicePixelRatio=2&backgroundColor=%23f3f4f6&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+    return `https://quickchart.io/chart?width=1200&height=560&devicePixelRatio=2&backgroundColor=${encodeURIComponent(CHART_BG)}&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
   }
 
   buildBaseEmbed(title) {
