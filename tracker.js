@@ -1264,16 +1264,44 @@ class StatsTracker {
       },
       options: {
         indexAxis: 'y',
-        layout: { padding: 16 },
-        plugins: { legend: { display: false } },
+        layout: { padding: 22 },
+        plugins: {
+          legend: { display: false },
+          title: {
+            display: true,
+            text: label,
+            color: '#111827',
+            font: { size: 22, weight: 'bold' },
+            padding: { bottom: 18 },
+          },
+        },
         scales: {
-          x: { beginAtZero: true, title: { display: true, text: axisTitle } },
-          y: { grid: { display: false } },
+          x: {
+            beginAtZero: true,
+            grid: { color: '#d1d5db' },
+            ticks: {
+              color: '#111827',
+              font: { size: 16, weight: 'bold' },
+            },
+            title: {
+              display: true,
+              text: axisTitle,
+              color: '#111827',
+              font: { size: 18, weight: 'bold' },
+            },
+          },
+          y: {
+            grid: { display: false },
+            ticks: {
+              color: '#111827',
+              font: { size: 17, weight: 'bold' },
+            },
+          },
         },
       },
     };
 
-    return `https://quickchart.io/chart?width=1000&height=460&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+    return `https://quickchart.io/chart?width=1200&height=560&devicePixelRatio=2&backgroundColor=%23f3f4f6&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
   }
 
   buildTrendChartUrl({ labels, values, label, color, fillColor, axisTitle }) {
@@ -1290,22 +1318,53 @@ class StatsTracker {
             fill: true,
             pointBackgroundColor: color,
             pointBorderColor: color,
-            pointRadius: 3,
-            tension: 0.35,
+            pointRadius: 5,
+            pointHoverRadius: 6,
+            borderWidth: 4,
+            tension: 0.3,
           },
         ],
       },
       options: {
-        layout: { padding: 16 },
-        plugins: { legend: { display: false } },
+        layout: { padding: 22 },
+        plugins: {
+          legend: { display: false },
+          title: {
+            display: true,
+            text: label,
+            color: '#111827',
+            font: { size: 22, weight: 'bold' },
+            padding: { bottom: 18 },
+          },
+        },
         scales: {
-          x: { grid: { display: false } },
-          y: { beginAtZero: true, title: { display: true, text: axisTitle } },
+          x: {
+            grid: { color: '#d1d5db' },
+            ticks: {
+              color: '#111827',
+              font: { size: 16, weight: 'bold' },
+              maxRotation: 0,
+            },
+          },
+          y: {
+            beginAtZero: true,
+            grid: { color: '#d1d5db' },
+            ticks: {
+              color: '#111827',
+              font: { size: 16, weight: 'bold' },
+            },
+            title: {
+              display: true,
+              text: axisTitle,
+              color: '#111827',
+              font: { size: 18, weight: 'bold' },
+            },
+          },
         },
       },
     };
 
-    return `https://quickchart.io/chart?width=1000&height=460&devicePixelRatio=2&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
+    return `https://quickchart.io/chart?width=1200&height=560&devicePixelRatio=2&backgroundColor=%23f3f4f6&version=4&c=${encodeURIComponent(JSON.stringify(config))}`;
   }
 
   buildBaseEmbed(title) {
