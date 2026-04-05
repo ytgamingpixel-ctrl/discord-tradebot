@@ -45,6 +45,8 @@ const CHART_GRID = '#4b5563';
 const PANEL_WIDTH = 1200;
 const PANEL_HEIGHT = 760;
 const TOP_PANEL_HEIGHT = 940;
+const PANEL_RENDER_SCALE = 0.9;
+const PANEL_RENDER_WIDTH = Math.round(PANEL_WIDTH * PANEL_RENDER_SCALE);
 const PANEL_BG = '#1f2125';
 const PANEL_BG_ACCENT = '#272b33';
 const PANEL_CARD = '#2a2d33';
@@ -1888,8 +1890,11 @@ class StatsTracker {
   }
 
   buildPanelSvg(width, height, body) {
+    const renderWidth = Math.round(width * PANEL_RENDER_SCALE);
+    const renderHeight = Math.round(height * PANEL_RENDER_SCALE);
+
     return [
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${renderWidth}" height="${renderHeight}" viewBox="0 0 ${width} ${height}">`,
       '<defs>',
       '<linearGradient id="panelBg" x1="0" y1="0" x2="1" y2="1">',
       `<stop offset="0%" stop-color="${PANEL_BG_ACCENT}" />`,
@@ -1907,7 +1912,7 @@ class StatsTracker {
     if (!ResvgConstructor) return null;
 
     const resvg = new ResvgConstructor(svg, {
-      fitTo: { mode: 'width', value: PANEL_WIDTH },
+      fitTo: { mode: 'width', value: PANEL_RENDER_WIDTH },
       font: {
         loadSystemFonts: true,
         defaultFontFamily: 'DejaVu Sans',
