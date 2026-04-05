@@ -2105,7 +2105,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'players') {
       await interaction.deferReply();
-      await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 1));
+      await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
       return;
     }
 

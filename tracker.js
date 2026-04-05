@@ -65,6 +65,11 @@ const FONT_UI = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', Arial, sans-seri
 const FONT_DISPLAY = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', Arial, sans-serif";
 const PANEL_FRAME_MARGIN = 10;
 const PANEL_FRAME_RADIUS = 34;
+const PANEL_CONTENT_X = 40;
+const PANEL_CONTENT_WIDTH = PANEL_WIDTH - (PANEL_CONTENT_X * 2);
+const PANEL_PILL_GAP = 16;
+const PANEL_PILL_WIDTH = 252;
+const PANEL_PILL_WIDE_WIDTH = PANEL_CONTENT_WIDTH - (PANEL_PILL_WIDTH * 3) - (PANEL_PILL_GAP * 3);
 
 function escapeSvg(value) {
   return String(value ?? '')
@@ -79,6 +84,147 @@ function truncateLabel(value, maxLength = 24) {
   const text = String(value || '').trim();
   if (!text) return 'Unknown';
   return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 3))}...` : text;
+}
+
+function truncateToWidth(value, maxWidth, fontSize = 16, minChars = 6) {
+  const width = Math.max(1, Number(maxWidth || 0));
+  const approximateChars = Math.max(minChars, Math.floor(width / Math.max(6, fontSize * 0.58)));
+  return truncateLabel(value, approximateChars);
+}
+
+function estimateTextWidth(value, fontSize = 16, weight = 600, letterSpacing = 0) {
+  const text = String(value || '');
+  const weightFactor = weight >= 800 ? 1.08 : weight >= 700 ? 1.04 : 1;
+  let units = 0;
+
+  for (const char of text) {
+    if (char === ' ') units += 0.32;
+    else if ('il.:,;|!\'`'.includes(char)) units += 0.28;
+    else if ('mwWM@#%&'.includes(char)) units += 0.82;
+    else if (/[A-Z0-9]/.test(char)) units += 0.66;
+    else units += 0.56;
+  }
+
+  return (units * fontSize * weightFactor) + (Math.max(0, text.length - 1) * letterSpacing);
+}
+
+function fitTextToWidth(value, maxWidth, options = {}) {
+  const {
+    size = 16,
+    minSize = Math.max(10, size - 5),
+    weight = 600,
+    letterSpacing = 0,
+    minChars = 6,
+    fallback = 'Unknown',
+  } = options;
+
+  let text = String(value || '').trim() || fallback;
+  let fontSize = size;
+  const width = Math.max(1, Number(maxWidth || 0) - Math.max(4, Math.round(size * 0.18)));
+
+  while (fontSize > minSize && estimateTextWidth(text, fontSize, weight, letterSpacing) > width) {
+    fontSize -= 1;
+  }
+
+  if (estimateTextWidth(text, fontSize, weight, letterSpacing) <= width) {
+    return { text, size: fontSize };
+  }
+
+  let candidate = text;
+  while (candidate.length > minChars) {
+    const next = `${candidate.slice(0, -1).trimEnd()}...`;
+    if (estimateTextWidth(next, fontSize, weight, letterSpacing) <= width) {
+      return { text: next, size: fontSize };
+    }
+    candidate = candidate.slice(0, -1);
+  }
+
+  return {
+    text: truncateToWidth(text, width, fontSize, minChars),
+    size: fontSize,
+  };
+}
+
+function splitTextToLines(value, maxWidth, fontSize, weight, letterSpacing) {
+  const text = String(value || '').trim();
+  if (!text) return [];
+
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+
+  const lines = [];
+  let current = words.shift();
+
+  for (const word of words) {
+    const next = `${current} ${word}`;
+    if (estimateTextWidth(next, fontSize, weight, letterSpacing) <= maxWidth) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+
+  if (current) lines.push(current);
+  return lines;
+}
+
+function wrapTextToLines(value, maxWidth, maxLines = 2, options = {}) {
+  const {
+    size = 14,
+    minSize = Math.max(10, size - 3),
+    weight = 600,
+    letterSpacing = 0,
+    minChars = 8,
+    fallback = 'Unknown',
+  } = options;
+
+  const text = String(value || '').trim() || fallback;
+  const width = Math.max(1, Number(maxWidth || 0) - Math.max(4, Math.round(size * 0.18)));
+  let fontSize = size;
+
+  while (fontSize > minSize) {
+    const lines = splitTextToLines(text, width, fontSize, weight, letterSpacing);
+    if (lines.length <= maxLines) {
+      return {
+        lines: lines.map(line => fitTextToWidth(line, width, {
+          size: fontSize,
+          minSize: fontSize,
+          weight,
+          letterSpacing,
+          minChars,
+        }).text),
+        size: fontSize,
+      };
+    }
+    fontSize -= 1;
+  }
+
+  const lines = splitTextToLines(text, width, fontSize, weight, letterSpacing);
+  const trimmedLines = lines.slice(0, maxLines).map((line, index) => {
+    if (index < maxLines - 1) {
+      return fitTextToWidth(line, width, {
+        size: fontSize,
+        minSize: fontSize,
+        weight,
+        letterSpacing,
+        minChars,
+      }).text;
+    }
+
+    return fitTextToWidth(lines.slice(index).join(' '), width, {
+      size: fontSize,
+      minSize: fontSize,
+      weight,
+      letterSpacing,
+      minChars,
+    }).text;
+  });
+
+  return {
+    lines: trimmedLines,
+    size: fontSize,
+  };
 }
 
 function svgRect(x, y, width, height, radius, fill, stroke = 'none', strokeWidth = 0, opacity = 1) {
@@ -200,10 +346,17 @@ function renderIconChip(x, y, iconType, color, width = 42, height = 32) {
 
 function renderDataRowsCard({ x, y, width, height, title, chipType, chipColor, rows }) {
   const titleSize = width >= 320 ? 22 : title.length > 14 ? 18 : 22;
+  const titleFit = fitTextToWidth(title, width - 92, {
+    size: titleSize,
+    minSize: Math.max(16, titleSize - 4),
+    weight: 700,
+    letterSpacing: 0.2,
+    minChars: 8,
+  });
   const cardParts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
     renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
-    svgText(title, x + 66, y + 29, { size: titleSize, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+    svgText(titleFit.text, x + 66, y + 29, { size: titleFit.size, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   const rowHeight = 28;
@@ -213,16 +366,18 @@ function renderDataRowsCard({ x, y, width, height, title, chipType, chipColor, r
 
   rows.slice(0, 3).forEach((row, index) => {
     const rowY = startY + index * (rowHeight + rowGap);
+    const labelFit = fitTextToWidth(row.label, rowWidth * 0.48, { size: 15, minSize: 12, weight: 700, minChars: 6 });
+    const valueFit = fitTextToWidth(row.value, rowWidth * 0.42, { size: 15, minSize: 12, weight: 700, minChars: 6 });
     cardParts.push(svgRect(x + 12, rowY, rowWidth, rowHeight, 8, PANEL_ROW));
-    cardParts.push(svgText(row.label, x + 24, rowY + rowHeight / 2, {
-      size: 15,
+    cardParts.push(svgText(labelFit.text, x + 24, rowY + rowHeight / 2, {
+      size: labelFit.size,
       weight: 700,
       fill: PANEL_MUTED,
       family: FONT_DISPLAY,
       style: 'italic',
     }));
-    cardParts.push(svgText(row.value, x + width - 16, rowY + rowHeight / 2, {
-      size: 15,
+    cardParts.push(svgText(valueFit.text, x + width - 16, rowY + rowHeight / 2, {
+      size: valueFit.size,
       weight: 700,
       anchor: 'end',
       fill: PANEL_TEXT,
@@ -234,10 +389,12 @@ function renderDataRowsCard({ x, y, width, height, title, chipType, chipColor, r
 }
 
 function renderHeaderPill(x, y, width, label, value) {
+  const labelFit = fitTextToWidth(label, width - 32, { size: 12, minSize: 10, weight: 700, minChars: 8 });
+  const valueFit = fitTextToWidth(value, width - 32, { size: 16, minSize: 12, weight: 700, minChars: 8 });
   return [
     svgRect(x, y, width, 56, 16, PANEL_CARD_ALT, PANEL_STROKE, 1),
-    svgText(label, x + 16, y + 18, { size: 12, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }),
-    svgText(value, x + 16, y + 39, { size: 16, weight: 700, family: FONT_DISPLAY }),
+    svgText(labelFit.text, x + 16, y + 18, { size: labelFit.size, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }),
+    svgText(valueFit.text, x + 16, y + 39, { size: valueFit.size, weight: 700, family: FONT_DISPLAY }),
   ].join('');
 }
 
@@ -269,10 +426,11 @@ function renderAvatarBadge(x, y, initials, avatarDataUri = null, clipId = 'user-
 }
 
 function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, rows, valueLabel }) {
+  const titleFit = fitTextToWidth(title, width - 92, { size: 28, minSize: 19, weight: 700, letterSpacing: 0.2, minChars: 8 });
   const sectionParts = [
     svgRect(x, y, width, 260, 24, PANEL_CARD, PANEL_STROKE, 1.2),
     renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
-    svgText(title, x + 66, y + 29, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+    svgText(titleFit.text, x + 66, y + 29, { size: titleFit.size, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   const rowWidth = width - 32;
@@ -291,6 +449,11 @@ function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, row
 
   rows.slice(0, 3).forEach((row, index) => {
     const rowY = startY + index * 62;
+    const nameWidth = width - 220;
+    const valueText = String(row.value || '').trim();
+    const valueBoxWidth = Math.max(118, Math.min(180, Math.round(estimateTextWidth(valueText, 20, 800) + 28)));
+    const nameFit = fitTextToWidth(row.name, Math.max(100, nameWidth - valueBoxWidth), { size: 23, minSize: 16, weight: 600, minChars: 8 });
+    const valueFit = fitTextToWidth(valueText, valueBoxWidth - 20, { size: 20, minSize: 14, weight: 800, minChars: 5 });
     sectionParts.push(svgRect(x + 16, rowY, rowWidth, rowHeight, 12, PANEL_ROW));
     sectionParts.push(svgRect(x + 28, rowY + 7, 42, 34, 10, PANEL_BG_ACCENT));
     sectionParts.push(svgText(String(index + 1), x + 49, rowY + 24, {
@@ -299,18 +462,15 @@ function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, row
       anchor: 'middle',
       family: FONT_DISPLAY,
     }));
-    sectionParts.push(svgText(truncateLabel(row.name, 28), x + 92, rowY + 24, {
-      size: 23,
+    sectionParts.push(svgText(nameFit.text, x + 92, rowY + 24, {
+      size: nameFit.size,
       weight: 600,
       family: FONT_DISPLAY,
       style: 'italic',
     }));
-
-    const valueText = row.value;
-    const valueBoxWidth = Math.max(118, valueText.length * 14 + 28);
     sectionParts.push(svgRect(x + width - valueBoxWidth - 24, rowY + 8, valueBoxWidth, 32, 10, PANEL_CARD_ALT));
-    sectionParts.push(svgText(valueText, x + width - 24 - valueBoxWidth / 2, rowY + 24, {
-      size: 20,
+    sectionParts.push(svgText(valueFit.text, x + width - 24 - valueBoxWidth / 2, rowY + 24, {
+      size: valueFit.size,
       weight: 800,
       anchor: 'middle',
       family: FONT_DISPLAY,
@@ -329,9 +489,10 @@ function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, row
 }
 
 function renderLineChartCard({ x, y, width, height, title, subtitle, labels, datasets, yAxisLabel = null, tickFormatter = null }) {
+  const titleFit = fitTextToWidth(title, width * 0.36, { size: 28, minSize: 18, weight: 700, letterSpacing: 0.2, minChars: 8 });
   const parts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
-    svgText(title, x + 20, y + 28, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+    svgText(titleFit.text, x + 20, y + 28, { size: titleFit.size, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   if (subtitle) {
@@ -340,10 +501,11 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
 
   let legendX = x + width - 28;
   [...datasets].reverse().forEach(dataset => {
-    const labelWidth = Math.max(90, dataset.label.length * 11);
+    const labelWidth = Math.max(90, Math.min(170, Math.round(estimateTextWidth(dataset.label, 17, 700) + 28)));
+    const labelFit = fitTextToWidth(dataset.label, labelWidth - 24, { size: 17, minSize: 12, weight: 700, minChars: 6 });
     legendX -= labelWidth;
     parts.push(svgCircle(legendX, y + 29, 8, dataset.color));
-    parts.push(svgText(dataset.label, legendX + 22, y + 30, { size: 17, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }));
+    parts.push(svgText(labelFit.text, legendX + 22, y + 30, { size: labelFit.size, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }));
     legendX -= 40;
   });
 
@@ -432,9 +594,10 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
 }
 
 function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, color, valueLabel }) {
+  const titleFit = fitTextToWidth(title, width * 0.42, { size: 28, minSize: 18, weight: 700, letterSpacing: 0.2, minChars: 8 });
   const parts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
-    svgText(title, x + 20, y + 28, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+    svgText(titleFit.text, x + 20, y + 28, { size: titleFit.size, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   if (subtitle) {
@@ -468,16 +631,18 @@ function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, c
 
   rows.slice(0, 8).forEach((row, index) => {
     const rowY = startY + index * (rowHeight + rowGap);
-    parts.push(svgText(`${index + 1}. ${truncateLabel(row.name, 24)}`, x + 22, rowY + rowHeight / 2, {
-      size: 20,
+    const labelFit = fitTextToWidth(`${index + 1}. ${row.name}`, 170, { size: 20, minSize: 13, weight: 700, minChars: 8 });
+    const valueFit = fitTextToWidth(row.value, 118, { size: 19, minSize: 13, weight: 800, minChars: 5 });
+    parts.push(svgText(labelFit.text, x + 22, rowY + rowHeight / 2, {
+      size: labelFit.size,
       weight: 700,
       family: FONT_DISPLAY,
       style: 'italic',
     }));
     parts.push(svgRect(barAreaX, rowY + 11, barAreaWidth, 30, 10, PANEL_ROW));
     parts.push(svgRect(barAreaX, rowY + 11, Math.max(26, (barAreaWidth * Number(row.numericValue || 0)) / maxValue), 30, 10, color));
-    parts.push(svgText(row.value, x + width - 24, rowY + rowHeight / 2, {
-      size: 19,
+    parts.push(svgText(valueFit.text, x + width - 24, rowY + rowHeight / 2, {
+      size: valueFit.size,
       weight: 800,
       anchor: 'end',
       family: FONT_DISPLAY,
@@ -488,13 +653,14 @@ function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, c
 }
 
 function renderMetricPill(x, y, width, label, value, accent = PANEL_BLUE) {
-  const safeLabel = truncateLabel(label, Math.max(10, Math.floor(width / 12)));
-  const safeValue = truncateLabel(value, Math.max(10, Math.floor(width / 10)));
+  const labelFit = fitTextToWidth(label, width - 58, { size: 13, minSize: 11, weight: 700, minChars: 8 });
+  const preferredValueSize = String(value || '').length > 18 ? 21 : 24;
+  const valueFit = fitTextToWidth(value, width - 58, { size: preferredValueSize, minSize: 13, weight: 800, minChars: 5 });
   return [
     svgRect(x, y, width, 74, 18, PANEL_CARD_ALT, PANEL_STROKE, 1),
     svgRect(x + 14, y + 14, 6, 46, 3, accent),
-    svgText(safeLabel, x + 32, y + 24, { size: 13, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }),
-    svgText(safeValue, x + 32, y + 48, { size: 24, weight: 800, family: FONT_DISPLAY }),
+    svgText(labelFit.text, x + 32, y + 24, { size: labelFit.size, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }),
+    svgText(valueFit.text, x + 32, y + 48, { size: valueFit.size, weight: 800, family: FONT_DISPLAY }),
   ].join('');
 }
 
@@ -510,10 +676,17 @@ function renderKeyValueCard({
   rows = [],
   rowHeight = 38,
 }) {
+  const titleFit = fitTextToWidth(title, width - 92, {
+    size: 26,
+    minSize: 18,
+    weight: 700,
+    letterSpacing: 0.2,
+    minChars: 8,
+  });
   const parts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
     renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
-    svgText(title, x + 66, y + 29, { size: 26, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+    svgText(titleFit.text, x + 66, y + 29, { size: titleFit.size, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   if (subtitle) {
@@ -532,16 +705,21 @@ function renderKeyValueCard({
 
   rows.slice(0, maxRows).forEach((row, index) => {
     const rowY = startY + index * (rowHeight + rowGap);
+    const rowInnerWidth = width - 28;
+    const labelWidth = Math.max(84, Math.min(108, Math.round(rowInnerWidth * 0.32)));
+    const valueWidth = Math.max(108, rowInnerWidth - labelWidth - 40);
+    const labelFit = fitTextToWidth(row.label, labelWidth, { size: 16, minSize: 12, weight: 700, minChars: 6 });
+    const valueFit = fitTextToWidth(row.value, valueWidth, { size: 16, minSize: 11, weight: 800, minChars: 6 });
     parts.push(svgRect(x + 14, rowY, width - 28, rowHeight, 10, PANEL_ROW));
-    parts.push(svgText(truncateLabel(row.label, 32), x + 26, rowY + rowHeight / 2, {
-      size: 16,
+    parts.push(svgText(labelFit.text, x + 26, rowY + rowHeight / 2, {
+      size: labelFit.size,
       weight: 700,
       fill: PANEL_MUTED,
       family: FONT_DISPLAY,
       style: 'italic',
     }));
-    parts.push(svgText(truncateLabel(row.value, 22), x + width - 24, rowY + rowHeight / 2, {
-      size: 17,
+    parts.push(svgText(valueFit.text, x + width - 24, rowY + rowHeight / 2, {
+      size: valueFit.size,
       weight: 800,
       anchor: 'end',
       family: FONT_DISPLAY,
@@ -563,10 +741,17 @@ function renderListRowsCard({
   rows = [],
   rowHeight = 56,
 }) {
+  const titleFit = fitTextToWidth(title, width - 92, {
+    size: 26,
+    minSize: 18,
+    weight: 700,
+    letterSpacing: 0.2,
+    minChars: 8,
+  });
   const parts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
     renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
-    svgText(title, x + 66, y + 29, { size: 26, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+    svgText(titleFit.text, x + 66, y + 29, { size: titleFit.size, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   if (subtitle) {
@@ -586,38 +771,63 @@ function renderListRowsCard({
   rows.slice(0, maxRows).forEach((row, index) => {
     const rowY = startY + index * (rowHeight + rowGap);
     const valueText = String(row.value || '').trim();
-    const valueBoxWidth = valueText ? Math.max(112, Math.min(180, valueText.length * 12 + 28)) : 0;
-    const valueAreaOffset = valueBoxWidth ? valueBoxWidth + 34 : 28;
+    const innerWidth = width - 28;
+    const valueBoxWidth = valueText ? Math.max(104, Math.min(164, Math.round(estimateTextWidth(valueText, 14, 800) + 30))) : 0;
+    const tertiaryWidth = row.tertiary
+      ? Math.max(132, Math.min(250, Math.round(innerWidth * (rowHeight >= 84 ? 0.34 : 0.24))))
+      : 0;
+    const valueBoxLeft = valueText ? x + width - valueBoxWidth - 22 : x + width - 24;
+    const textLeft = x + 28;
+    const tertiaryRight = valueBoxLeft - 14;
+    const tertiaryLeft = tertiaryWidth ? tertiaryRight - tertiaryWidth : tertiaryRight;
+    const textRight = tertiaryWidth
+      ? tertiaryLeft - 18
+      : valueText
+        ? valueBoxLeft - 18
+        : x + width - 24;
+    const textWidth = Math.max(84, textRight - textLeft);
+    const primaryFit = fitTextToWidth(row.primary, textWidth, { size: 16, minSize: 12, weight: 800, minChars: 8 });
+    const secondaryBlock = row.secondary
+      ? wrapTextToLines(row.secondary, textWidth, rowHeight >= 84 ? 2 : 1, { size: 13, minSize: 10, weight: 700, minChars: 12 })
+      : null;
+    const valueFit = valueText ? fitTextToWidth(valueText, valueBoxWidth - 22, { size: 14, minSize: 11, weight: 800, minChars: 5 }) : null;
+    const tertiaryFit = row.tertiary
+      ? fitTextToWidth(row.tertiary, Math.max(96, tertiaryRight - tertiaryLeft), { size: 12, minSize: 10, weight: 700, minChars: 8 })
+      : null;
     parts.push(svgRect(x + 14, rowY, width - 28, rowHeight, 12, PANEL_ROW));
-    parts.push(svgText(truncateLabel(row.primary, 32), x + 28, rowY + 18, {
-      size: 17,
+    parts.push(svgText(primaryFit.text, x + 28, row.secondary ? rowY + 18 : rowY + (rowHeight / 2), {
+      size: primaryFit.size,
       weight: 800,
       family: FONT_DISPLAY,
       style: 'italic',
     }));
 
-    if (row.secondary) {
-      parts.push(svgText(truncateLabel(row.secondary, valueText ? 36 : 48), x + 28, rowY + 40, {
-        size: 13,
-        weight: 700,
-        fill: PANEL_MUTED,
-        family: FONT_DISPLAY,
-      }));
+    if (secondaryBlock) {
+      const secondaryStartY = rowHeight >= 84 ? rowY + 38 : rowY + 40;
+      const lineGap = secondaryBlock.size + (rowHeight >= 84 ? 3 : 0);
+      secondaryBlock.lines.forEach((line, lineIndex) => {
+        parts.push(svgText(line, x + 28, secondaryStartY + (lineIndex * lineGap), {
+          size: secondaryBlock.size,
+          weight: 700,
+          fill: PANEL_MUTED,
+          family: FONT_DISPLAY,
+        }));
+      });
     }
 
-    if (valueText) {
-      parts.push(svgRect(x + width - valueBoxWidth - 22, rowY + 12, valueBoxWidth, rowHeight - 24, 10, PANEL_CARD_ALT));
-      parts.push(svgText(truncateLabel(valueText, 18), x + width - 22 - valueBoxWidth / 2, rowY + rowHeight / 2, {
-        size: 15,
+    if (valueText && valueFit) {
+      parts.push(svgRect(valueBoxLeft, rowY + 12, valueBoxWidth, rowHeight - 24, 10, PANEL_CARD_ALT));
+      parts.push(svgText(valueFit.text, valueBoxLeft + (valueBoxWidth / 2), rowY + rowHeight / 2, {
+        size: valueFit.size,
         weight: 800,
         anchor: 'middle',
         family: FONT_DISPLAY,
       }));
     }
 
-    if (row.tertiary) {
-      parts.push(svgText(truncateLabel(row.tertiary, 18), x + width - valueAreaOffset, rowY + 40, {
-        size: 12,
+    if (tertiaryFit) {
+      parts.push(svgText(tertiaryFit.text, tertiaryRight, row.secondary ? rowY + 40 : rowY + rowHeight / 2, {
+        size: tertiaryFit.size,
         weight: 700,
         fill: PANEL_SUBTLE,
         anchor: 'end',
@@ -2380,18 +2590,18 @@ class StatsTracker {
         }];
 
     const header = [
-      svgText('Players', 48, 52, { size: 46, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
-      svgText(`${guildName} - Last ${days} Day${days === 1 ? '' : 's'}`, 48, 92, {
+      svgText('Players', PANEL_CONTENT_X, 52, { size: 46, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`${guildName} - Last ${days} Day${days === 1 ? '' : 's'}`, PANEL_CONTENT_X, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
         family: FONT_DISPLAY,
         style: 'italic',
       }),
-      renderMetricPill(48, 118, 250, 'Live Now', formatNumber(current.count), PANEL_BLUE),
-      renderMetricPill(314, 118, 250, 'Peak', formatNumber(peak.count || 0), '#a78bfa'),
-      renderMetricPill(580, 118, 250, 'Peak Time', peak.ts ? new Date(peak.ts).toLocaleDateString('en-GB') : 'No data', PANEL_GOLD),
-      renderMetricPill(846, 118, 306, 'Range', `${days} day${days === 1 ? '' : 's'}`, PANEL_CYAN),
+      renderMetricPill(PANEL_CONTENT_X, 118, PANEL_PILL_WIDTH, 'Live Now', formatNumber(current.count), PANEL_BLUE),
+      renderMetricPill(PANEL_CONTENT_X + PANEL_PILL_WIDTH + PANEL_PILL_GAP, 118, PANEL_PILL_WIDTH, 'Peak', formatNumber(peak.count || 0), '#a78bfa'),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Peak Time', peak.ts ? new Date(peak.ts).toLocaleDateString('en-GB') : 'No data', PANEL_GOLD),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Range', `${days} day${days === 1 ? '' : 's'}`, PANEL_CYAN),
     ];
 
     const datasets = [{
@@ -2404,9 +2614,9 @@ class StatsTracker {
     if (activeCategory === 'players') {
       const body = [
         renderLineChartCard({
-          x: 48,
+          x: PANEL_CONTENT_X,
           y: 214,
-          width: 1104,
+          width: PANEL_CONTENT_WIDTH,
           height: 500,
           title: 'Peak Trend',
           subtitle: `Tracked player peaks across the last ${days} day${days === 1 ? '' : 's'}`,
@@ -2416,16 +2626,16 @@ class StatsTracker {
           tickFormatter: value => formatNumber(Math.round(Number(value || 0))),
         }),
         renderListRowsCard({
-          x: 48,
+          x: PANEL_CONTENT_X,
           y: 730,
-          width: 1104,
+          width: PANEL_CONTENT_WIDTH,
           height: 174,
           title: 'Online Now',
           subtitle: 'Compact live list',
           chipType: 'players',
           chipColor: PANEL_BLUE,
           rows: playerRows.slice(0, 3),
-          rowHeight: 44,
+          rowHeight: 46,
         }),
       ].join('');
 
@@ -2434,21 +2644,21 @@ class StatsTracker {
 
     const body = [
       renderListRowsCard({
-        x: 48,
+        x: PANEL_CONTENT_X,
         y: 214,
-        width: 430,
+        width: 428,
         height: 736,
         title: 'Online Now',
         subtitle: 'Compact live list',
         chipType: 'players',
         chipColor: PANEL_BLUE,
         rows: playerRows,
-        rowHeight: 56,
+        rowHeight: 58,
       }),
       renderLineChartCard({
-        x: 502,
+        x: PANEL_CONTENT_X + 452,
         y: 214,
-        width: 650,
+        width: 668,
         height: 736,
         title: 'Peak Trend',
         subtitle: `Tracked player peaks across the last ${days} day${days === 1 ? '' : 's'}`,
@@ -2463,27 +2673,35 @@ class StatsTracker {
   }
 
   buildTradeRoutePanelSvg(route, historyBundle, rationale = []) {
+    const title = `Best Route - ${route.shipProfile.name}`;
+    const titleFit = fitTextToWidth(title, PANEL_CONTENT_WIDTH, {
+      size: 42,
+      minSize: 30,
+      weight: 800,
+      letterSpacing: 0.2,
+      minChars: 12,
+    });
     const header = [
-      svgText(`Best Route - ${route.shipProfile.name}`, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
-      svgText(`${route.buyShortGroup} -> ${route.sellShortGroup}`, 48, 92, {
+      svgText(titleFit.text, PANEL_CONTENT_X, 52, { size: titleFit.size, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`${route.buyShortGroup} -> ${route.sellShortGroup}`, PANEL_CONTENT_X, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
         family: FONT_DISPLAY,
         style: 'italic',
       }),
-      renderMetricPill(48, 118, 202, 'Investment', `${formatNumber(Math.round(route.cargoValue))} aUEC`, PANEL_BLUE),
-      renderMetricPill(266, 118, 202, 'Gross Profit', `${formatNumber(Math.round(route.totalProfit))} aUEC`, PANEL_GREEN),
-      renderMetricPill(484, 118, 202, 'Expected Profit', `${formatNumber(Math.round(route.expectedProfit || 0))} aUEC`, PANEL_GOLD),
-      renderMetricPill(702, 118, 202, 'ROI', `${route.profitPercent.toFixed(1)}%`, PANEL_PINK),
-      renderMetricPill(920, 118, 232, 'Confidence', `${Math.round((route.confidenceScore || 0) * 100)}% ${route.confidenceLabel}`, PANEL_CYAN),
+      renderMetricPill(PANEL_CONTENT_X, 118, 208, 'Investment', `${formatNumber(Math.round(route.cargoValue))} aUEC`, PANEL_BLUE),
+      renderMetricPill(PANEL_CONTENT_X + 224, 118, 208, 'Gross Profit', `${formatNumber(Math.round(route.totalProfit))} aUEC`, PANEL_GREEN),
+      renderMetricPill(PANEL_CONTENT_X + 448, 118, 208, 'Expected Profit', `${formatNumber(Math.round(route.expectedProfit || 0))} aUEC`, PANEL_GOLD),
+      renderMetricPill(PANEL_CONTENT_X + 672, 118, 208, 'ROI', `${route.profitPercent.toFixed(1)}%`, PANEL_PINK),
+      renderMetricPill(PANEL_CONTENT_X + 896, 118, 224, 'Confidence', `${Math.round((route.confidenceScore || 0) * 100)}% ${route.confidenceLabel}`, PANEL_CYAN),
     ];
 
     const body = [
       renderKeyValueCard({
-        x: 48,
+        x: PANEL_CONTENT_X,
         y: 214,
-        width: 344,
+        width: 352,
         height: 580,
         title: 'Run Specs',
         chipType: 'route',
@@ -2498,9 +2716,9 @@ class StatsTracker {
         ],
       }),
       renderKeyValueCard({
-        x: 408,
+        x: PANEL_CONTENT_X + 368,
         y: 214,
-        width: 344,
+        width: 352,
         height: 580,
         title: 'Market Quality',
         chipType: 'cargo',
@@ -2515,7 +2733,7 @@ class StatsTracker {
         ],
       }),
       renderListRowsCard({
-        x: 768,
+        x: PANEL_CONTENT_X + 736,
         y: 214,
         width: 384,
         height: 580,
@@ -2553,43 +2771,51 @@ class StatsTracker {
   }
 
   buildBracketRoutesPanelSvg({ ship, location, finish, sourceLabel, brackets }) {
+    const title = `Bracket Routes - ${ship.name}`;
+    const titleFit = fitTextToWidth(title, PANEL_CONTENT_WIDTH, {
+      size: 42,
+      minSize: 30,
+      weight: 800,
+      letterSpacing: 0.2,
+      minChars: 12,
+    });
     const rows = brackets.map(bracket => bracket.route
       ? {
-          primary: `${bracket.name} • ${bracket.route.commodity}`,
+          primary: `${bracket.name} | ${bracket.route.commodity}`,
           secondary: `${bracket.route.buyShortGroup} -> ${bracket.route.sellShortGroup}`,
           value: `${formatNumber(Math.round(bracket.route.totalProfit))} aUEC`,
-          tertiary: `ROI ${bracket.route.profitPercent.toFixed(1)}% • ${Math.round((bracket.route.confidenceScore || 0) * 100)}% conf`,
+          tertiary: `ROI ${bracket.route.profitPercent.toFixed(1)}% | ${Math.round((bracket.route.confidenceScore || 0) * 100)}% conf`,
         }
       : {
-          primary: `${bracket.name} • No route found`,
+          primary: `${bracket.name} | No route found`,
           secondary: 'No matching commodity run for the current filters',
           value: 'None',
         });
 
     const header = [
-      svgText(`Bracket Routes - ${ship.name}`, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
-      svgText('Best route per cargo bracket', 48, 92, {
+      svgText(titleFit.text, PANEL_CONTENT_X, 52, { size: titleFit.size, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText('Best route per cargo bracket', PANEL_CONTENT_X, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
         family: FONT_DISPLAY,
         style: 'italic',
       }),
-      renderMetricPill(48, 118, 250, 'Start', location || 'Any', PANEL_BLUE),
-      renderMetricPill(314, 118, 250, 'Finish', finish || 'Any', PANEL_PINK),
-      renderMetricPill(580, 118, 250, 'Ship Cargo', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
-      renderMetricPill(846, 118, 306, 'Data Source', sourceLabel, PANEL_GOLD),
+      renderMetricPill(PANEL_CONTENT_X, 118, PANEL_PILL_WIDTH, 'Start', location || 'Any', PANEL_BLUE),
+      renderMetricPill(PANEL_CONTENT_X + PANEL_PILL_WIDTH + PANEL_PILL_GAP, 118, PANEL_PILL_WIDTH, 'Finish', finish || 'Any', PANEL_PINK),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Ship Cargo', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Data Source', sourceLabel, PANEL_GOLD),
       renderListRowsCard({
-        x: 48,
+        x: PANEL_CONTENT_X,
         y: 214,
-        width: 1104,
+        width: PANEL_CONTENT_WIDTH,
         height: 580,
         title: 'Recommended Runs',
         subtitle: 'Ranked with live pricing, route confidence, and liquidity weighting',
         chipType: 'route',
         chipColor: PANEL_GREEN,
         rows,
-        rowHeight: 64,
+        rowHeight: 68,
       }),
     ];
 
@@ -2599,7 +2825,7 @@ class StatsTracker {
   buildLocationPanelSvg(group) {
     const shopRows = group.terminals.slice(0, 7).map(terminal => ({
       primary: terminal.name,
-      secondary: `${terminal.sells.length} sells • ${terminal.buys.length} buys`,
+      secondary: `${terminal.sells.length} sells | ${terminal.buys.length} buys`,
     }));
     const sellRows = group.sells.slice(0, 7).map(item => ({
       primary: item.commodity,
@@ -2613,53 +2839,53 @@ class StatsTracker {
     }));
 
     const header = [
-      svgText(group.shortName, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
-      svgText(`${group.system} • ${group.locationType}`, 48, 92, {
+      svgText(group.shortName, PANEL_CONTENT_X, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`${group.system} | ${group.locationType}`, PANEL_CONTENT_X, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
         family: FONT_DISPLAY,
         style: 'italic',
       }),
-      renderMetricPill(48, 118, 250, 'Commodity Shops', formatNumber(group.terminals.length), PANEL_BLUE),
-      renderMetricPill(314, 118, 250, 'Sells', formatNumber(group.sells.length), PANEL_GREEN),
-      renderMetricPill(580, 118, 250, 'Buys', formatNumber(group.buys.length), PANEL_PINK),
-      renderMetricPill(846, 118, 306, 'Atmosphere', group.atmospheric ? 'Yes' : 'No', PANEL_CYAN),
+      renderMetricPill(PANEL_CONTENT_X, 118, PANEL_PILL_WIDTH, 'Commodity Shops', formatNumber(group.terminals.length), PANEL_BLUE),
+      renderMetricPill(PANEL_CONTENT_X + PANEL_PILL_WIDTH + PANEL_PILL_GAP, 118, PANEL_PILL_WIDTH, 'Sells', formatNumber(group.sells.length), PANEL_GREEN),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Buys', formatNumber(group.buys.length), PANEL_PINK),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Atmosphere', group.atmospheric ? 'Yes' : 'No', PANEL_CYAN),
       renderListRowsCard({
-        x: 48,
+        x: PANEL_CONTENT_X,
         y: 214,
-        width: 336,
+        width: 320,
         height: 580,
         title: 'Shops',
         subtitle: 'Commodity terminals in this area',
         chipType: 'location',
         chipColor: PANEL_BLUE,
         rows: shopRows.length ? shopRows : [{ primary: 'No terminals found', secondary: 'No tracked commodity terminals here' }],
-        rowHeight: 54,
+        rowHeight: 56,
       }),
       renderListRowsCard({
-        x: 400,
+        x: PANEL_CONTENT_X + 336,
         y: 214,
-        width: 352,
+        width: 368,
         height: 580,
         title: 'Best Sells',
         subtitle: 'Cheapest local sell offers',
         chipType: 'cargo',
         chipColor: PANEL_GREEN,
         rows: sellRows.length ? sellRows : [{ primary: 'Nothing currently listed', secondary: 'No sell offers are tracked here' }],
-        rowHeight: 54,
+        rowHeight: 56,
       }),
       renderListRowsCard({
-        x: 768,
+        x: PANEL_CONTENT_X + 720,
         y: 214,
-        width: 384,
+        width: 400,
         height: 580,
         title: 'Best Buys',
         subtitle: 'Strongest local buy offers',
         chipType: 'leaderboard',
         chipColor: PANEL_PINK,
         rows: buyRows.length ? buyRows : [{ primary: 'Nothing currently listed', secondary: 'No buy offers are tracked here' }],
-        rowHeight: 54,
+        rowHeight: 56,
       }),
     ];
 
@@ -2667,39 +2893,47 @@ class StatsTracker {
   }
 
   buildBuyersPanelSvg({ commodity, amount, location, buyers }) {
+    const title = `Best Buyers - ${commodity}`;
+    const titleFit = fitTextToWidth(title, PANEL_CONTENT_WIDTH, {
+      size: 40,
+      minSize: 28,
+      weight: 800,
+      letterSpacing: 0.2,
+      minChars: 12,
+    });
     const rows = buyers.map((buyer, index) => ({
       primary: `${index + 1}. ${buyer.shortGroupName}`,
       secondary: buyer.terminalName,
       value: `${formatNumber(Math.round(buyer.price))} / SCU`,
       tertiary: amount
-        ? `Sellable ${formatNumber(Math.round(buyer.sellableAmount ?? amount))} • ${formatNumber(Math.round(buyer.totalValue || 0))} aUEC`
+        ? `Sellable ${formatNumber(Math.round(buyer.sellableAmount ?? amount))} | ${formatNumber(Math.round(buyer.totalValue || 0))} aUEC`
         : `Demand ${buyer.demand ? formatNumber(Math.round(buyer.demand)) : 'Unknown'} SCU`,
     }));
 
     const header = [
-      svgText(`Best Buyers - ${commodity}`, 48, 52, { size: 40, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
-      svgText('Highest paying buyer destinations', 48, 92, {
+      svgText(titleFit.text, PANEL_CONTENT_X, 52, { size: titleFit.size, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText('Highest paying buyer destinations', PANEL_CONTENT_X, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
         family: FONT_DISPLAY,
         style: 'italic',
       }),
-      renderMetricPill(48, 118, 250, 'Commodity', commodity, PANEL_GREEN),
-      renderMetricPill(314, 118, 250, 'Amount', amount ? `${formatNumber(amount)} SCU` : 'Not set', PANEL_BLUE),
-      renderMetricPill(580, 118, 250, 'Location Filter', location || 'None', PANEL_PINK),
-      renderMetricPill(846, 118, 306, 'Results', formatNumber(buyers.length), PANEL_GOLD),
+      renderMetricPill(PANEL_CONTENT_X, 118, PANEL_PILL_WIDTH, 'Commodity', commodity, PANEL_GREEN),
+      renderMetricPill(PANEL_CONTENT_X + PANEL_PILL_WIDTH + PANEL_PILL_GAP, 118, PANEL_PILL_WIDTH, 'Amount', amount ? `${formatNumber(amount)} SCU` : 'Not set', PANEL_BLUE),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Location Filter', location || 'None', PANEL_PINK),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Results', formatNumber(buyers.length), PANEL_GOLD),
       renderListRowsCard({
-        x: 48,
+        x: PANEL_CONTENT_X,
         y: 214,
-        width: 1104,
+        width: PANEL_CONTENT_WIDTH,
         height: 580,
         title: 'Buyer Board',
         subtitle: amount ? 'Ranked by total sale value for the requested cargo' : 'Ranked by price per SCU',
         chipType: 'leaderboard',
         chipColor: PANEL_GOLD,
         rows,
-        rowHeight: 64,
+        rowHeight: 68,
       }),
     ];
 
@@ -2707,23 +2941,30 @@ class StatsTracker {
   }
 
   buildShipPanelSvg(ship, sourceLabel) {
+    const titleFit = fitTextToWidth(ship.name, PANEL_CONTENT_WIDTH, {
+      size: 42,
+      minSize: 30,
+      weight: 800,
+      letterSpacing: 0.2,
+      minChars: 10,
+    });
     const header = [
-      svgText(ship.name, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
-      svgText('Cargo hauling profile', 48, 92, {
+      svgText(titleFit.text, PANEL_CONTENT_X, 52, { size: titleFit.size, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText('Cargo hauling profile', PANEL_CONTENT_X, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
         family: FONT_DISPLAY,
         style: 'italic',
       }),
-      renderMetricPill(48, 118, 250, 'Cargo Capacity', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
-      renderMetricPill(314, 118, 250, 'Military?', ship.military ? 'Yes' : 'No', PANEL_GOLD),
-      renderMetricPill(580, 118, 250, 'Cargo Tier', ship.cargoTier, PANEL_CYAN),
-      renderMetricPill(846, 118, 306, 'Data Source', sourceLabel, PANEL_BLUE),
+      renderMetricPill(PANEL_CONTENT_X, 118, PANEL_PILL_WIDTH, 'Cargo Capacity', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
+      renderMetricPill(PANEL_CONTENT_X + PANEL_PILL_WIDTH + PANEL_PILL_GAP, 118, PANEL_PILL_WIDTH, 'Military?', ship.military ? 'Yes' : 'No', PANEL_GOLD),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Cargo Tier', ship.cargoTier, PANEL_CYAN),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Data Source', sourceLabel, PANEL_BLUE),
       renderKeyValueCard({
-        x: 48,
+        x: PANEL_CONTENT_X,
         y: 214,
-        width: 520,
+        width: 516,
         height: 580,
         title: 'Profile',
         chipType: 'ship',
@@ -2737,9 +2978,9 @@ class StatsTracker {
         ],
       }),
       renderListRowsCard({
-        x: 592,
+        x: PANEL_CONTENT_X + 532,
         y: 214,
-        width: 560,
+        width: 588,
         height: 580,
         title: 'Hauling Notes',
         subtitle: 'Quick take for route planning',
@@ -2877,7 +3118,7 @@ class StatsTracker {
     });
   }
 
-  buildPlayersEmbed(guild, days = 1, category = 'overview', showTime = false, graphMenuEnabled = false) {
+  buildPlayersEmbed(guild, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
     const activeCategory = this.normalizeCategory('players', category, graphMenuEnabled);
     const current = this.getCurrentPlayers(guild);
     const peak = this.getPeakForRange(days);
