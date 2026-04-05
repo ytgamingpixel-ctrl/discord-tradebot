@@ -9,7 +9,24 @@ const {
   EmbedBuilder,
   StringSelectMenuBuilder,
 } = require('discord.js');
-const { Resvg } = require('@resvg/resvg-js');
+
+let CachedResvg = null;
+let resvgLoadAttempted = false;
+
+function getResvgConstructor() {
+  if (CachedResvg) return CachedResvg;
+  if (resvgLoadAttempted) return null;
+
+  resvgLoadAttempted = true;
+
+  try {
+    ({ Resvg: CachedResvg } = require('@resvg/resvg-js'));
+    return CachedResvg;
+  } catch (error) {
+    console.warn('Stats image renderer unavailable, falling back to standard embeds:', error.message);
+    return null;
+  }
+}
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
 const MAX_DAYS = 35;
@@ -42,6 +59,8 @@ const PANEL_PINK = '#f06292';
 const PANEL_CYAN = '#22d3ee';
 const PANEL_GOLD = '#f6c453';
 const PANEL_BLUE = '#78a9ff';
+const FONT_UI = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', Arial, sans-serif";
+const FONT_DISPLAY = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', Arial, sans-serif";
 
 function escapeSvg(value) {
   return String(value ?? '')
@@ -55,7 +74,7 @@ function escapeSvg(value) {
 function truncateLabel(value, maxLength = 24) {
   const text = String(value || '').trim();
   if (!text) return 'Unknown';
-  return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1))}…` : text;
+  return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 3))}...` : text;
 }
 
 function svgRect(x, y, width, height, radius, fill, stroke = 'none', strokeWidth = 0, opacity = 1) {
@@ -70,6 +89,10 @@ function svgLine(x1, y1, x2, y2, stroke, strokeWidth = 1, opacity = 1, dashArray
   return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${strokeWidth}" opacity="${opacity}"${dashArray ? ` stroke-dasharray="${dashArray}"` : ''} />`;
 }
 
+function svgPath(d, fill = 'none', stroke = 'none', strokeWidth = 0, opacity = 1) {
+  return `<path d="${d}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}" />`;
+}
+
 function svgText(value, x, y, options = {}) {
   const {
     size = 18,
@@ -77,11 +100,12 @@ function svgText(value, x, y, options = {}) {
     fill = PANEL_TEXT,
     anchor = 'start',
     opacity = 1,
-    family = 'Segoe UI, Arial, sans-serif',
+    family = FONT_UI,
+    style = 'normal',
     letterSpacing = 0,
   } = options;
 
-  return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}" font-weight="${weight}" text-anchor="${anchor}" dominant-baseline="middle" opacity="${opacity}" letter-spacing="${letterSpacing}">${escapeSvg(value)}</text>`;
+  return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}" font-weight="${weight}" font-style="${style}" text-anchor="${anchor}" dominant-baseline="middle" opacity="${opacity}" letter-spacing="${letterSpacing}">${escapeSvg(value)}</text>`;
 }
 
 function formatHoursVerbose(seconds, decimals = 2) {
@@ -114,40 +138,71 @@ function getTickIndices(total, targetCount = 4) {
   return Array.from(values).sort((a, b) => a - b);
 }
 
-function renderIconChip(x, y, label, color, width = 42, height = 32) {
-  return [
-    svgRect(x, y, width, height, 11, color, 'none', 0),
-    svgText(label, x + width / 2, y + height / 2 + 1, {
-      size: label.length > 2 ? 13 : 15,
+function renderIconChip(x, y, iconType, color, width = 42, height = 32) {
+  const parts = [svgRect(x, y, width, height, 11, color, 'none', 0)];
+  const iconFill = PANEL_BG;
+
+  if (iconType === 'messages') {
+    parts.push(svgRect(x + 10, y + 8, 18, 12, 4, iconFill));
+    parts.push(svgPath(`M ${x + 15} ${y + 20} L ${x + 13} ${y + 25} L ${x + 19} ${y + 20} Z`, iconFill));
+  } else if (iconType === 'voice') {
+    parts.push(svgPath(`M ${x + 10} ${y + 16} L ${x + 14} ${y + 16} L ${x + 19} ${y + 11} L ${x + 19} ${y + 23} L ${x + 14} ${y + 18} L ${x + 10} ${y + 18} Z`, iconFill));
+    parts.push(svgPath(`M ${x + 22} ${y + 13} Q ${x + 26} ${y + 16} ${x + 22} ${y + 19}`, 'none', iconFill, 2));
+    parts.push(svgPath(`M ${x + 24} ${y + 10} Q ${x + 30} ${y + 16} ${x + 24} ${y + 22}`, 'none', iconFill, 2));
+  } else if (iconType === 'starCitizen') {
+    parts.push(svgPath(`M ${x + 19} ${y + 8} L ${x + 24} ${y + 13} L ${x + 21} ${y + 24} L ${x + 17} ${y + 24} L ${x + 14} ${y + 13} Z`, iconFill));
+    parts.push(svgPath(`M ${x + 14} ${y + 17} L ${x + 10} ${y + 21} L ${x + 15} ${y + 21} Z`, iconFill));
+    parts.push(svgPath(`M ${x + 24} ${y + 17} L ${x + 28} ${y + 21} L ${x + 23} ${y + 21} Z`, iconFill));
+    parts.push(svgCircle(x + 19, y + 15, 2.2, color));
+    parts.push(svgPath(`M ${x + 17} ${y + 24} L ${x + 14} ${y + 28} L ${x + 19} ${y + 26} L ${x + 24} ${y + 28} L ${x + 21} ${y + 24} Z`, iconFill));
+  } else if (iconType === 'leaderboard') {
+    parts.push(svgPath(`M ${x + 12} ${y + 9} H ${x + 24} V ${y + 14} C ${x + 24} ${y + 18} ${x + 21} ${y + 21} ${x + 18} ${y + 21} C ${x + 15} ${y + 21} ${x + 12} ${y + 18} ${x + 12} ${y + 14} Z`, iconFill));
+    parts.push(svgPath(`M ${x + 12} ${y + 12} C ${x + 8} ${y + 12} ${x + 8} ${y + 18} ${x + 12} ${y + 18}`, 'none', iconFill, 2));
+    parts.push(svgPath(`M ${x + 24} ${y + 12} C ${x + 28} ${y + 12} ${x + 28} ${y + 18} ${x + 24} ${y + 18}`, 'none', iconFill, 2));
+    parts.push(svgRect(x + 16, y + 21, 4, 5, 1, iconFill));
+    parts.push(svgRect(x + 13, y + 27, 10, 3, 1.5, iconFill));
+  } else {
+    parts.push(svgText('#', x + width / 2, y + height / 2 + 1, {
+      size: 16,
       weight: 800,
-      fill: PANEL_BG,
+      fill: iconFill,
       anchor: 'middle',
-    }),
-  ].join('');
+      family: FONT_DISPLAY,
+    }));
+  }
+
+  return parts.join('');
 }
 
-function renderDataRowsCard({ x, y, width, height, title, chipLabel, chipColor, rows }) {
-  const titleSize = title.length > 18 ? 21 : title.length > 12 ? 25 : 30;
+function renderDataRowsCard({ x, y, width, height, title, chipType, chipColor, rows }) {
+  const titleSize = width >= 320 ? 22 : title.length > 14 ? 18 : 22;
   const cardParts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
-    renderIconChip(x + 18, y + 16, chipLabel, chipColor, chipLabel.length > 2 ? 52 : 42, 34),
-    svgText(title, x + 82, y + 33, { size: titleSize, weight: 700 }),
+    renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
+    svgText(title, x + 66, y + 29, { size: titleSize, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
-  const rowHeight = 34;
-  const rowGap = 10;
-  const rowWidth = width - 32;
-  const startY = y + 62;
+  const rowHeight = 24;
+  const rowGap = 6;
+  const rowWidth = width - 24;
+  const startY = y + 58;
 
   rows.slice(0, 3).forEach((row, index) => {
     const rowY = startY + index * (rowHeight + rowGap);
-    cardParts.push(svgRect(x + 16, rowY, rowWidth, rowHeight, 10, PANEL_ROW));
-    cardParts.push(svgText(row.label, x + 32, rowY + rowHeight / 2, { size: 18, weight: 700 }));
-    cardParts.push(svgText(row.value, x + width - 24, rowY + rowHeight / 2, {
-      size: 18,
+    cardParts.push(svgRect(x + 12, rowY, rowWidth, rowHeight, 8, PANEL_ROW));
+    cardParts.push(svgText(row.label, x + 24, rowY + rowHeight / 2, {
+      size: 15,
+      weight: 700,
+      fill: PANEL_MUTED,
+      family: FONT_DISPLAY,
+      style: 'italic',
+    }));
+    cardParts.push(svgText(row.value, x + width - 16, rowY + rowHeight / 2, {
+      size: 15,
       weight: 700,
       anchor: 'end',
       fill: PANEL_TEXT,
+      family: FONT_UI,
     }));
   });
 
@@ -157,23 +212,43 @@ function renderDataRowsCard({ x, y, width, height, title, chipLabel, chipColor, 
 function renderHeaderPill(x, y, width, label, value) {
   return [
     svgRect(x, y, width, 56, 16, PANEL_CARD_ALT, PANEL_STROKE, 1),
-    svgText(label, x + 16, y + 18, { size: 14, weight: 700, fill: PANEL_MUTED }),
-    svgText(value, x + 16, y + 39, { size: 18, weight: 700 }),
+    svgText(label, x + 16, y + 18, { size: 12, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }),
+    svgText(value, x + 16, y + 39, { size: 16, weight: 700, family: FONT_DISPLAY }),
   ].join('');
 }
 
-function renderAvatarBadge(x, y, initials) {
+function renderAvatarBadge(x, y, initials, avatarDataUri = null, clipId = 'user-avatar') {
+  if (avatarDataUri) {
+    return [
+      '<defs>',
+      `<clipPath id="${clipId}">`,
+      `<circle cx="${x + 32}" cy="${y + 32}" r="32" />`,
+      '</clipPath>',
+      '</defs>',
+      svgCircle(x + 32, y + 32, 32, PANEL_BLUE),
+      `<image href="${avatarDataUri}" x="${x}" y="${y}" width="64" height="64" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})" />`,
+      svgCircle(x + 32, y + 32, 32, 'none', PANEL_STROKE, 1.5),
+    ].join('');
+  }
+
   return [
     svgCircle(x + 32, y + 32, 32, PANEL_BLUE),
-    svgText(initials, x + 32, y + 34, { size: 24, weight: 800, fill: PANEL_BG, anchor: 'middle' }),
+    svgText(initials, x + 32, y + 34, {
+      size: 24,
+      weight: 800,
+      fill: PANEL_BG,
+      anchor: 'middle',
+      family: FONT_DISPLAY,
+      style: 'italic',
+    }),
   ].join('');
 }
 
-function renderLeaderboardSection({ x, y, width, title, chipLabel, chipColor, rows, valueLabel }) {
+function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, rows, valueLabel }) {
   const sectionParts = [
     svgRect(x, y, width, 248, 24, PANEL_CARD, PANEL_STROKE, 1.2),
-    renderIconChip(x + 18, y + 16, chipLabel, chipColor, chipLabel.length > 2 ? 52 : 42, 34),
-    svgText(title, x + 82, y + 33, { size: 30, weight: 700 }),
+    renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
+    svgText(title, x + 66, y + 29, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   const rowWidth = width - 32;
@@ -198,10 +273,13 @@ function renderLeaderboardSection({ x, y, width, title, chipLabel, chipColor, ro
       size: 19,
       weight: 800,
       anchor: 'middle',
+      family: FONT_DISPLAY,
     }));
     sectionParts.push(svgText(truncateLabel(row.name, 28), x + 92, rowY + 24, {
       size: 23,
       weight: 600,
+      family: FONT_DISPLAY,
+      style: 'italic',
     }));
 
     const valueText = row.value;
@@ -211,6 +289,7 @@ function renderLeaderboardSection({ x, y, width, title, chipLabel, chipColor, ro
       size: 20,
       weight: 800,
       anchor: 'middle',
+      family: FONT_DISPLAY,
     }));
   });
 
@@ -219,19 +298,20 @@ function renderLeaderboardSection({ x, y, width, title, chipLabel, chipColor, ro
     weight: 700,
     fill: PANEL_MUTED,
     anchor: 'end',
+    family: FONT_DISPLAY,
   }));
 
   return sectionParts.join('');
 }
 
-function renderLineChartCard({ x, y, width, height, title, subtitle, labels, datasets }) {
+function renderLineChartCard({ x, y, width, height, title, subtitle, labels, datasets, yAxisLabel = null, tickFormatter = null }) {
   const parts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
-    svgText(title, x + 20, y + 28, { size: 28, weight: 700 }),
+    svgText(title, x + 20, y + 28, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   if (subtitle) {
-    parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED }));
+    parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED, family: FONT_DISPLAY, style: 'italic' }));
   }
 
   let legendX = x + width - 24;
@@ -239,18 +319,45 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
     const labelWidth = Math.max(70, dataset.label.length * 10);
     legendX -= labelWidth;
     parts.push(svgCircle(legendX, y + 29, 8, dataset.color));
-    parts.push(svgText(dataset.label, legendX + 18, y + 30, { size: 17, weight: 700, fill: PANEL_MUTED }));
+    parts.push(svgText(dataset.label, legendX + 18, y + 30, { size: 17, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }));
     legendX -= 26;
   });
 
-  const plotX = x + 24;
+  const showYAxis = Boolean(yAxisLabel);
+  const plotX = x + (showYAxis ? 84 : 24);
   const plotY = y + 78;
-  const plotWidth = width - 48;
+  const plotWidth = width - (showYAxis ? 108 : 48);
   const plotHeight = height - 116;
+  const combinedMax = Math.max(
+    1,
+    ...datasets.flatMap(dataset => dataset.values.map(value => Number(value || 0))),
+  );
 
-  for (let step = 0; step <= 3; step += 1) {
-    const lineY = plotY + (plotHeight * step) / 3;
+  for (let step = 0; step <= 4; step += 1) {
+    const lineY = plotY + (plotHeight * step) / 4;
     parts.push(svgLine(plotX, lineY, plotX + plotWidth, lineY, PANEL_STROKE, 1, 0.55, '6 10'));
+  }
+
+  if (showYAxis) {
+    parts.push(svgLine(plotX, plotY, plotX, plotY + plotHeight, PANEL_STROKE, 1.2));
+
+    for (let step = 0; step <= 4; step += 1) {
+      const value = (combinedMax * (4 - step)) / 4;
+      const lineY = plotY + (plotHeight * step) / 4;
+      const label = typeof tickFormatter === 'function'
+        ? tickFormatter(value)
+        : Number.isInteger(value)
+          ? String(value)
+          : value.toFixed(1);
+
+      parts.push(svgText(label, plotX - 12, lineY, {
+        size: 14,
+        weight: 700,
+        fill: PANEL_SUBTLE,
+        anchor: 'end',
+        family: FONT_DISPLAY,
+      }));
+    }
   }
 
   const hasData = datasets.some(dataset => dataset.values.some(value => Number(value) > 0));
@@ -264,14 +371,9 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
     return parts.join('');
   }
 
-  const sharedMax = Math.max(
-    1,
-    ...datasets.flatMap(dataset => dataset.values.map(value => Number(value || 0))),
-  );
-
   datasets.forEach(dataset => {
     const ownMax = Math.max(1, ...dataset.values.map(value => Number(value || 0)));
-    const scaleMax = dataset.normalize ? ownMax : sharedMax;
+    const scaleMax = dataset.normalize ? ownMax : combinedMax;
     const points = dataset.values.map((value, index) => {
       const progress = labels.length === 1 ? 0.5 : index / (labels.length - 1);
       const xPos = plotX + progress * plotWidth;
@@ -298,6 +400,7 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
       weight: 700,
       fill: PANEL_SUBTLE,
       anchor: index === 0 ? 'start' : index === labels.length - 1 ? 'end' : 'middle',
+      family: FONT_DISPLAY,
     }));
   });
 
@@ -307,11 +410,11 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
 function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, color, valueLabel }) {
   const parts = [
     svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
-    svgText(title, x + 20, y + 28, { size: 28, weight: 700 }),
+    svgText(title, x + 20, y + 28, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   if (subtitle) {
-    parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED }));
+    parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED, family: FONT_DISPLAY, style: 'italic' }));
   }
 
   if (!rows.length) {
@@ -336,6 +439,7 @@ function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, c
     weight: 700,
     fill: PANEL_MUTED,
     anchor: 'end',
+    family: FONT_DISPLAY,
   }));
 
   rows.slice(0, 8).forEach((row, index) => {
@@ -343,6 +447,8 @@ function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, c
     parts.push(svgText(`${index + 1}. ${truncateLabel(row.name, 24)}`, x + 22, rowY + rowHeight / 2, {
       size: 20,
       weight: 700,
+      family: FONT_DISPLAY,
+      style: 'italic',
     }));
     parts.push(svgRect(barAreaX, rowY + 11, barAreaWidth, 30, 10, PANEL_ROW));
     parts.push(svgRect(barAreaX, rowY + 11, Math.max(26, (barAreaWidth * Number(row.numericValue || 0)) / maxValue), 30, 10, color));
@@ -350,6 +456,7 @@ function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, c
       size: 19,
       weight: 800,
       anchor: 'end',
+      family: FONT_DISPLAY,
     }));
   });
 
@@ -552,6 +659,7 @@ class StatsTracker {
     this.state.meta ??= { createdAt: now(), lastSavedAt: null };
 
     this.saveTimer = null;
+    this.avatarCache = new Map();
   }
 
   init() {
@@ -1172,8 +1280,8 @@ class StatsTracker {
         labels,
         datasets: [
           { label: 'Messages', data: messages, borderColor: '#60a5fa', yAxisID: 'y1', fill: false, tension: 0.3 },
-          { label: 'VC Hours', data: voiceHours, borderColor: '#34d399', yAxisID: 'y', fill: false, tension: 0.3 },
-          { label: 'SC Hours', data: playtimeHours, borderColor: '#f59e0b', yAxisID: 'y', fill: false, tension: 0.3 },
+          { label: 'Voice Activity', data: voiceHours, borderColor: '#34d399', yAxisID: 'y', fill: false, tension: 0.3 },
+          { label: 'SC Activity', data: playtimeHours, borderColor: '#f59e0b', yAxisID: 'y', fill: false, tension: 0.3 },
         ],
       },
       options: {
@@ -1510,10 +1618,6 @@ class StatsTracker {
         .setCustomId(encodeStatsButton('time', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
         .setEmoji('\u{1F552}')
         .setStyle(showTime ? ButtonStyle.Primary : ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(encodeStatsButton('graph', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
-        .setEmoji('\u{1F4CA}')
-        .setStyle(graphMenuEnabled ? ButtonStyle.Primary : ButtonStyle.Secondary),
     );
   }
 
@@ -1738,6 +1842,11 @@ class StatsTracker {
         initials,
         createdAt: member.user?.createdAt || null,
         joinedAt: member.joinedAt || null,
+        avatarUrl: typeof member.displayAvatarURL === 'function'
+          ? member.displayAvatarURL({ extension: 'png', forceStatic: true, size: 128 })
+          : typeof member.user?.displayAvatarURL === 'function'
+            ? member.user.displayAvatarURL({ extension: 'png', forceStatic: true, size: 128 })
+            : null,
       };
     }
 
@@ -1748,7 +1857,34 @@ class StatsTracker {
       initials: fallbackName.slice(0, 2).toUpperCase(),
       createdAt: null,
       joinedAt: null,
+      avatarUrl: null,
     };
+  }
+
+  async getUserAvatarDataUri(userId) {
+    const cached = this.avatarCache.get(userId);
+    if (cached && cached.expiresAt > now()) return cached.dataUri;
+
+    const context = this.getMemberContext(userId);
+    if (!context.avatarUrl) return null;
+    if (typeof fetch !== 'function') return null;
+
+    try {
+      const response = await fetch(context.avatarUrl);
+      if (!response.ok) return null;
+
+      const contentType = response.headers.get('content-type') || 'image/png';
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const dataUri = `data:${contentType};base64,${buffer.toString('base64')}`;
+      this.avatarCache.set(userId, {
+        dataUri,
+        expiresAt: now() + 6 * 60 * 60 * 1000,
+      });
+      return dataUri;
+    } catch (error) {
+      console.warn(`Could not load avatar for ${userId}:`, error.message);
+      return null;
+    }
   }
 
   buildPanelSvg(width, height, body) {
@@ -1767,20 +1903,39 @@ class StatsTracker {
   }
 
   renderSvgAttachment(svg, name) {
-    const resvg = new Resvg(svg, {
+    const ResvgConstructor = getResvgConstructor();
+    if (!ResvgConstructor) return null;
+
+    const resvg = new ResvgConstructor(svg, {
       fitTo: { mode: 'width', value: PANEL_WIDTH },
       font: {
         loadSystemFonts: true,
-        defaultFontFamily: 'Segoe UI',
+        defaultFontFamily: 'DejaVu Sans',
       },
     });
 
     return new AttachmentBuilder(resvg.render().asPng(), { name });
   }
 
-  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer }) {
+  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer, fallbackPayload }) {
     try {
       const attachment = this.renderSvgAttachment(svg, attachmentName);
+      if (!attachment) {
+        return typeof fallbackPayload === 'function'
+          ? fallbackPayload()
+          : {
+              embeds: [
+                new EmbedBuilder()
+                  .setColor(0x2b2d31)
+                  .setTitle(title || 'Stats')
+                  .setDescription('Rendered stats cards are unavailable right now.'),
+              ],
+              components,
+              attachments: [],
+              ...(typeof content === 'string' ? { content } : {}),
+            };
+      }
+
       const embed = new EmbedBuilder()
         .setColor(0x2b2d31)
         .setImage(`attachment://${attachmentName}`);
@@ -1799,6 +1954,8 @@ class StatsTracker {
       return payload;
     } catch (error) {
       console.error('Failed to render stats card:', error);
+      if (typeof fallbackPayload === 'function') return fallbackPayload();
+
       const fallback = new EmbedBuilder()
         .setColor(0x2b2d31)
         .setTitle(title || 'Stats')
@@ -1818,16 +1975,16 @@ class StatsTracker {
   }
 
   getPanelVisuals(category) {
-    if (category === 'messages') return { title: 'Messages', chipLabel: '#', chipColor: PANEL_GREEN, valueLabel: 'Messages' };
-    if (category === 'voice') return { title: 'Voice Activity', chipLabel: 'VC', chipColor: PANEL_PINK, valueLabel: 'Hours' };
-    if (category === 'starCitizen') return { title: 'SC Activity', chipLabel: 'SC', chipColor: PANEL_CYAN, valueLabel: 'Hours' };
-    return { title: 'Activity', chipLabel: 'ST', chipColor: PANEL_BLUE, valueLabel: 'Value' };
+    if (category === 'messages') return { title: 'Messages', chipType: 'messages', chipColor: PANEL_GREEN, valueLabel: 'Messages' };
+    if (category === 'voice') return { title: 'Voice Activity', chipType: 'voice', chipColor: PANEL_PINK, valueLabel: 'Hours' };
+    if (category === 'starCitizen') return { title: 'SC Activity', chipType: 'starCitizen', chipColor: PANEL_CYAN, valueLabel: 'Hours' };
+    return { title: 'Activity', chipType: 'messages', chipColor: PANEL_BLUE, valueLabel: 'Value' };
   }
 
   buildTopPanelSvg(days, activeCategory, board) {
     const header = [
-      svgText('Top Activity', 36, 44, { size: 44, weight: 800 }),
-      svgText(`Last ${days} Day${days === 1 ? '' : 's'} • UTC`, 36, 82, { size: 18, weight: 700, fill: PANEL_MUTED }),
+      svgText('Top Activity', 36, 44, { size: 44, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.3 }),
+      svgText(`Last ${days} Day${days === 1 ? '' : 's'} - UTC`, 36, 82, { size: 18, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY, style: 'italic' }),
     ];
 
     if (activeCategory === 'overview') {
@@ -1856,7 +2013,7 @@ class StatsTracker {
           y: section.y,
           width: 1140,
           title: visuals.title,
-          chipLabel: visuals.chipLabel,
+          chipType: visuals.chipType,
           chipColor: visuals.chipColor,
           rows: section.rows,
           valueLabel: visuals.valueLabel,
@@ -1882,7 +2039,7 @@ class StatsTracker {
       width: 1140,
       height: 792,
       title: visuals.title,
-      subtitle: `Top tracked members • Last ${days} Day${days === 1 ? '' : 's'}`,
+      subtitle: `Top tracked members - Last ${days} Day${days === 1 ? '' : 's'}`,
       rows,
       color: visuals.chipColor,
       valueLabel: visuals.valueLabel,
@@ -1891,8 +2048,9 @@ class StatsTracker {
     return this.buildPanelSvg(PANEL_WIDTH, TOP_PANEL_HEIGHT, `${header.join('')}${chart}`);
   }
 
-  buildUserPanelSvg(userId, days, activeCategory, stats, rankings) {
+  async buildUserPanelSvg(userId, days, activeCategory, stats, rankings) {
     const context = this.getMemberContext(userId);
+    const avatarDataUri = await this.getUserAvatarDataUri(userId);
     const summaryWindows = this.getSummaryWindows();
     const messageRows = summaryWindows.map(windowDays => {
       const windowStats = this.getUserStats(userId, windowDays);
@@ -1934,20 +2092,23 @@ class StatsTracker {
           normalize: false,
         }];
 
+    const metricConfig = activeCategory !== 'overview' ? this.getMetricConfig(activeCategory) : null;
     const parts = [
-      renderAvatarBadge(48, 34, context.initials),
-      svgText(context.displayName, 128, 54, { size: 46, weight: 800 }),
-      svgText(`Tracked stats profile • Last ${days} Day${days === 1 ? '' : 's'}`, 128, 92, {
+      renderAvatarBadge(48, 34, context.initials, avatarDataUri, `avatar-${userId}`),
+      svgText(context.displayName, 128, 54, { size: 46, weight: 800, family: FONT_DISPLAY, style: 'italic', letterSpacing: 0.2 }),
+      svgText(`Tracked stats profile - Last ${days} Day${days === 1 ? '' : 's'}`, 128, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
       }),
       renderHeaderPill(776, 36, 184, 'Created On', this.formatFullDate(context.createdAt)),
       renderHeaderPill(968, 36, 184, 'Joined On', this.formatFullDate(context.joinedAt)),
-      renderDataRowsCard({ x: 48, y: 128, width: 264, height: 160, title: 'Server Ranks', chipLabel: 'RK', chipColor: PANEL_GOLD, rows: rankRows }),
-      renderDataRowsCard({ x: 328, y: 128, width: 264, height: 160, title: 'Messages', chipLabel: '#', chipColor: PANEL_GREEN, rows: messageRows }),
-      renderDataRowsCard({ x: 608, y: 128, width: 264, height: 160, title: 'Voice Activity', chipLabel: 'VC', chipColor: PANEL_PINK, rows: voiceRows }),
-      renderDataRowsCard({ x: 888, y: 128, width: 264, height: 160, title: 'SC Activity', chipLabel: 'SC', chipColor: PANEL_CYAN, rows: starCitizenRows }),
+      renderDataRowsCard({ x: 48, y: 128, width: 264, height: 160, title: 'Server Ranks', chipType: 'leaderboard', chipColor: PANEL_GOLD, rows: rankRows }),
+      renderDataRowsCard({ x: 328, y: 128, width: 264, height: 160, title: 'Messages', chipType: 'messages', chipColor: PANEL_GREEN, rows: messageRows }),
+      renderDataRowsCard({ x: 608, y: 128, width: 264, height: 160, title: 'Voice Activity', chipType: 'voice', chipColor: PANEL_PINK, rows: voiceRows }),
+      renderDataRowsCard({ x: 888, y: 128, width: 264, height: 160, title: 'SC Activity', chipType: 'starCitizen', chipColor: PANEL_CYAN, rows: starCitizenRows }),
       renderLineChartCard({
         x: 48,
         y: 314,
@@ -1957,6 +2118,10 @@ class StatsTracker {
         subtitle: `Last ${days} Day${days === 1 ? '' : 's'}`,
         labels: stats.daily.map(day => day.label),
         datasets,
+        yAxisLabel: metricConfig ? metricConfig.axisTitle : null,
+        tickFormatter: metricConfig?.axisTitle === 'Hours'
+          ? value => Number(value || 0).toFixed(1)
+          : value => formatNumber(Math.round(Number(value || 0))),
       }),
     ];
 
@@ -1991,17 +2156,20 @@ class StatsTracker {
           normalize: false,
         }];
 
+    const metricConfig = activeCategory !== 'overview' ? this.getMetricConfig(activeCategory) : null;
     const parts = [
-      svgText('Server Activity', 48, 52, { size: 46, weight: 800 }),
-      svgText(`Tracked totals • Last ${days} Day${days === 1 ? '' : 's'}`, 48, 92, {
+      svgText('Server Activity', 48, 52, { size: 46, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`Tracked totals - Last ${days} Day${days === 1 ? '' : 's'}`, 48, 92, {
         size: 18,
         weight: 700,
         fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
       }),
       renderHeaderPill(950, 36, 202, 'Timezone', 'UTC'),
-      renderDataRowsCard({ x: 48, y: 128, width: 352, height: 160, title: 'Messages', chipLabel: '#', chipColor: PANEL_GREEN, rows: messageRows }),
-      renderDataRowsCard({ x: 424, y: 128, width: 352, height: 160, title: 'Voice Activity', chipLabel: 'VC', chipColor: PANEL_PINK, rows: voiceRows }),
-      renderDataRowsCard({ x: 800, y: 128, width: 352, height: 160, title: 'SC Activity', chipLabel: 'SC', chipColor: PANEL_CYAN, rows: starCitizenRows }),
+      renderDataRowsCard({ x: 48, y: 128, width: 352, height: 160, title: 'Messages', chipType: 'messages', chipColor: PANEL_GREEN, rows: messageRows }),
+      renderDataRowsCard({ x: 424, y: 128, width: 352, height: 160, title: 'Voice Activity', chipType: 'voice', chipColor: PANEL_PINK, rows: voiceRows }),
+      renderDataRowsCard({ x: 800, y: 128, width: 352, height: 160, title: 'SC Activity', chipType: 'starCitizen', chipColor: PANEL_CYAN, rows: starCitizenRows }),
       renderLineChartCard({
         x: 48,
         y: 314,
@@ -2011,6 +2179,10 @@ class StatsTracker {
         subtitle: `Last ${days} Day${days === 1 ? '' : 's'}`,
         labels: stats.daily.map(day => day.label),
         datasets,
+        yAxisLabel: metricConfig ? metricConfig.axisTitle : null,
+        tickFormatter: metricConfig?.axisTitle === 'Hours'
+          ? value => Number(value || 0).toFixed(1)
+          : value => formatNumber(Math.round(Number(value || 0))),
       }),
     ];
 
@@ -2033,7 +2205,7 @@ class StatsTracker {
     });
   }
 
-  buildUserStatsEmbed(userId, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
+  async buildUserStatsEmbed(userId, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
     const activeCategory = this.normalizeCategory('user', category, graphMenuEnabled);
     const memberStillTracked = this.getTrackedMemberIds().has(userId);
     const stats = this.getUserStats(userId, days);
@@ -2055,7 +2227,7 @@ class StatsTracker {
 
     return this.buildImagePanelResponse({
       content: `<@${userId}> - Last ${days} Day${days === 1 ? '' : 's'}`,
-      svg: this.buildUserPanelSvg(userId, days, activeCategory, stats, rankings),
+      svg: await this.buildUserPanelSvg(userId, days, activeCategory, stats, rankings),
       attachmentName: `stats-user-${userId}-${days}-${activeCategory}.png`,
       components,
     });
@@ -2124,7 +2296,7 @@ class StatsTracker {
     return { embeds: [embed], components };
   }
 
-  buildPanel(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false, guild = null) {
+  async buildPanel(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false, guild = null) {
     if (panel === 'top') return this.buildTopEmbed(days, category, showTime, graphMenuEnabled);
     if (panel === 'user') return this.buildUserStatsEmbed(targetId, days, category, showTime, graphMenuEnabled);
     if (panel === 'server') return this.buildServerStatsEmbed(days, category, showTime, graphMenuEnabled);
@@ -2143,7 +2315,7 @@ class StatsTracker {
     const nextGraphMenuEnabled = decoded.graphMenuEnabled || selectedCategory !== 'overview';
 
     return interaction.editReply(
-      this.buildPanel(
+      await this.buildPanel(
         decoded.panel,
         decoded.targetId,
         decoded.days,
@@ -2161,7 +2333,7 @@ class StatsTracker {
 
     if (decoded.mode === 'legacy') {
       return interaction.editReply(
-        this.buildPanel(decoded.panel, decoded.targetId, decoded.days, 'overview', false, false, interaction.guild),
+        await this.buildPanel(decoded.panel, decoded.targetId, decoded.days, 'overview', false, false, interaction.guild),
       );
     }
 
@@ -2179,13 +2351,13 @@ class StatsTracker {
 
     if (action === 'refresh') {
       return interaction.editReply(
-        this.buildPanel(panel, targetId, days, activeCategory, showTime, graphMenuEnabled, interaction.guild),
+        await this.buildPanel(panel, targetId, days, activeCategory, showTime, graphMenuEnabled, interaction.guild),
       );
     }
 
     if (action === 'time') {
       return interaction.editReply(
-        this.buildPanel(panel, targetId, days, activeCategory, !showTime, graphMenuEnabled, interaction.guild),
+        await this.buildPanel(panel, targetId, days, activeCategory, !showTime, graphMenuEnabled, interaction.guild),
       );
     }
 
@@ -2194,13 +2366,13 @@ class StatsTracker {
       const nextCategory = nextGraphMenuEnabled ? activeCategory : 'overview';
 
       return interaction.editReply(
-        this.buildPanel(panel, targetId, days, nextCategory, showTime, nextGraphMenuEnabled, interaction.guild),
+        await this.buildPanel(panel, targetId, days, nextCategory, showTime, nextGraphMenuEnabled, interaction.guild),
       );
     }
 
     if (action === 'range') {
       return interaction.editReply(
-        this.buildPanel(panel, targetId, days, activeCategory, true, graphMenuEnabled, interaction.guild),
+        await this.buildPanel(panel, targetId, days, activeCategory, true, graphMenuEnabled, interaction.guild),
       );
     }
 

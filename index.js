@@ -1428,7 +1428,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'top') {
       await interaction.deferReply();
-      await interaction.editReply(tracker.buildTopEmbed(7));
+      await interaction.editReply(await tracker.buildTopEmbed(7));
       return;
     }
 
@@ -1438,12 +1438,12 @@ client.on(Events.InteractionCreate, async interaction => {
       const user = interaction.options.getUser('user', false);
 
       if (subcommand === 'user' && user) {
-        await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+        await interaction.editReply(await tracker.buildUserStatsEmbed(user.id, 7));
         return;
       }
 
       if (!subcommand && user) {
-        await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+        await interaction.editReply(await tracker.buildUserStatsEmbed(user.id, 7));
         return;
       }
 
@@ -1458,7 +1458,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'server') {
       await interaction.deferReply();
-      await interaction.editReply(tracker.buildServerStatsEmbed(7));
+      await interaction.editReply(await tracker.buildServerStatsEmbed(7));
       return;
     }
 
