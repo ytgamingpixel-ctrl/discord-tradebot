@@ -61,6 +61,7 @@ const cache = {
 
 const routeStates = new Map();
 const activeMessageLocks = new Set();
+let marketDataWarmPromise = null;
 
 const MONITOR_FILE = path.join(__dirname, 'monitor-state.json');
 const ALERT_GUILD_ID = process.env.ALERT_GUILD_ID || null;
@@ -70,6 +71,10 @@ let shuttingDown = false;
 
 function normalizeText(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function isUnknownInteractionError(error) {
+  return Number(error?.code) === 10062 || /Unknown interaction/i.test(String(error?.message || ''));
 }
 
 function clamp(value, min, max) {
@@ -853,6 +858,27 @@ async function loadMarketData(force = false) {
   return cache;
 }
 
+function warmMarketData(force = false) {
+  const now = Date.now();
+  if (!force && cache.lastUpdated && now - cache.lastUpdated < CACHE_TTL_MS) {
+    return Promise.resolve(cache);
+  }
+
+  if (!force && marketDataWarmPromise) return marketDataWarmPromise;
+
+  const task = loadMarketData(force)
+    .catch(error => {
+      console.error('Background market data warm failed:', error);
+      throw error;
+    })
+    .finally(() => {
+      if (marketDataWarmPromise === task) marketDataWarmPromise = null;
+    });
+
+  marketDataWarmPromise = task;
+  return task;
+}
+
 function getCommodityRanking(route) {
   return (
     cache.commodityRankings.get(Number(route?.commodityId || 0)) ||
@@ -1584,10 +1610,14 @@ async function handleAutocomplete(interaction) {
   }
 
   if (focused.name === 'location' || focused.name === 'finish') {
-    try {
-      if (!cache.shortGroupNames.length) await loadMarketData(false);
-    } catch (error) {
-      console.error('Autocomplete market load error:', error);
+    if (!cache.shortGroupNames.length) {
+      void warmMarketData(false).catch(() => {});
+      await interaction.respond([]);
+      return;
+    }
+
+    if (Date.now() - cache.lastUpdated >= CACHE_TTL_MS) {
+      void warmMarketData(false).catch(() => {});
     }
 
     await interaction.respond(pickAutocompleteChoices(cache.shortGroupNames, focused.value));
@@ -1595,10 +1625,14 @@ async function handleAutocomplete(interaction) {
   }
 
   if (focused.name === 'commodity') {
-    try {
-      if (!cache.commodityNames.length) await loadMarketData(false);
-    } catch (error) {
-      console.error('Commodity autocomplete load error:', error);
+    if (!cache.commodityNames.length) {
+      void warmMarketData(false).catch(() => {});
+      await interaction.respond([]);
+      return;
+    }
+
+    if (Date.now() - cache.lastUpdated >= CACHE_TTL_MS) {
+      void warmMarketData(false).catch(() => {});
     }
 
     await interaction.respond(pickAutocompleteChoices(cache.commodityNames, focused.value));
@@ -1822,7 +1856,10 @@ async function handleRouteButton(interaction, action, stateId) {
 
 client.once(Events.ClientReady, async readyClient => {
   loadStateStoreFromDisk();
-  await ensureShipData(false);
+  await Promise.allSettled([
+    ensureShipData(false),
+    warmMarketData(false),
+  ]);
 
   for (const guild of readyClient.guilds.cache.values()) {
     await tracker.hydrateGuild(guild);
@@ -1837,6 +1874,11 @@ client.on(Events.InteractionCreate, async interaction => {
     try {
       await handleAutocomplete(interaction);
     } catch (error) {
+      if (isUnknownInteractionError(error)) {
+        console.warn('Autocomplete expired before a response could be sent:', interaction.commandName, interaction.options.getFocused(true)?.name);
+        return;
+      }
+
       console.error('Autocomplete error:', error);
       void sendAlert({
         code: 'AUTOCOMPLETE_ERROR',
