@@ -1,6 +1,6 @@
 {
   "name": "sc-trade-bot",
-  "version": "1.3.22",
+  "version": "1.4.17",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

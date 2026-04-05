@@ -719,7 +719,7 @@ function getRiskReasons(route, cargo, cargoValue, shipName) {
   if (cargo > 750) reasons.push('very large cargo load');
   if (cargoValue > 10000000) reasons.push('extremely high cargo value');
   else if (cargoValue > 1000000) reasons.push('high cargo value');
-  if (ship.military) reasons.push('military hull lowered risk');
+  if (ship.military) reasons.push('military-derived hull lowered risk');
   else if (ship.cargo <= 32) reasons.push('smaller cargo ship');
 
   if (!reasons.length) reasons.push('no major risk factors');
@@ -1014,11 +1014,12 @@ function buildControlRow(stateId, disabled = false) {
   );
 }
 
-function getBudgetStep(currentBudget) {
-  if (!currentBudget || currentBudget < 100000) return 25000;
-  if (currentBudget < 500000) return 50000;
-  if (currentBudget < 2000000) return 100000;
-  return 250000;
+function getAdjustedBudget(currentBudget, direction) {
+  const baseBudget = Math.max(1000, Math.round(Number(currentBudget || 0)));
+  const delta = Math.max(1000, Math.round(baseBudget * 0.2));
+  const nextBudget = direction === 'up' ? baseBudget + delta : baseBudget - delta;
+
+  return Math.max(1000, Math.round(nextBudget / 1000) * 1000);
 }
 
 async function buildRouteResponse(params, existingStateId = null) {
@@ -1034,12 +1035,10 @@ async function buildRouteResponse(params, existingStateId = null) {
   }
 
   const route = result.route;
-  const currentBudget = params.budget || route.cargoValue;
-
   const nextState = {
     shipName: params.shipName,
     cargo: params.cargo ?? null,
-    budget: currentBudget,
+    budget: route.cargoValue,
     location: params.location ?? null,
     finish: params.finish ?? null,
     previousSignature: getRouteSignature(route),
@@ -1112,16 +1111,15 @@ async function handleRouteButton(interaction, action, stateId) {
     });
 
     const nextState = { ...state };
-    const currentBudget = state.budget || 100000;
-    const step = getBudgetStep(currentBudget);
+    const currentBudget = Math.max(1000, Math.round(Number(state.budget || 100000)));
 
     if (action === 'refresh') {
       nextState.previousSignature = state.previousSignature || null;
     } else if (action === 'invest_up') {
-      nextState.budget = Math.max(1, currentBudget + step);
+      nextState.budget = getAdjustedBudget(currentBudget, 'up');
       nextState.previousSignature = null;
     } else if (action === 'invest_down') {
-      nextState.budget = Math.max(1, currentBudget - step);
+      nextState.budget = getAdjustedBudget(currentBudget, 'down');
       nextState.previousSignature = null;
     }
 
@@ -1424,7 +1422,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'players') {
       await interaction.deferReply();
-      await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
+      await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 1));
       return;
     }
 
@@ -1458,7 +1456,7 @@ client.on(Events.InteractionCreate, async interaction => {
         .setThumbnail(EMBED_THUMBNAIL_URL)
         .addFields(
           { name: 'Cargo capacity', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
-          { name: 'Military hull', value: ship.military ? 'Yes' : 'No', inline: true },
+          { name: 'Military?', value: ship.military ? 'Yes' : 'No', inline: true },
           { name: 'Cargo tier', value: ship.cargoTier, inline: true },
           { name: 'Ship data source', value: getShipSourceLabel(), inline: false },
         )

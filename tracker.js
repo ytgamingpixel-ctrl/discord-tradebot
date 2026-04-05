@@ -1048,7 +1048,7 @@ class StatsTracker {
         formatValue: value => `${formatNumber(value)} message${Number(value) === 1 ? '' : 's'}`,
       },
       voice: {
-        label: 'VC Hours',
+        label: 'Voice Activity',
         axisTitle: 'Hours',
         color: '#34d399',
         fillColor: 'rgba(52, 211, 153, 0.18)',
@@ -1057,7 +1057,7 @@ class StatsTracker {
         formatValue: value => `${Number(value || 0).toFixed(1)} hours`,
       },
       starCitizen: {
-        label: 'SC Hours',
+        label: 'Star Citizen Activity',
         axisTitle: 'Hours',
         color: '#f59e0b',
         fillColor: 'rgba(245, 158, 11, 0.18)',
@@ -1098,7 +1098,7 @@ class StatsTracker {
   formatLeaderboardBubble(rows, category, limit = 5) {
     const metric = this.getMetricConfig(category);
     const top = rows.slice(0, limit);
-    if (!metric || !top.length) return '```\nNo data yet.\n```';
+    if (!metric || !top.length) return '`No data yet.`';
 
     const valueHeader = category === 'messages' ? 'Messages' : category === 'players' ? 'Players' : 'Hours';
     const rowsForDisplay = top.map((row, index) => {
@@ -1115,7 +1115,7 @@ class StatsTracker {
     const nameWidth = Math.min(
       20,
       Math.max(
-        'Names'.length,
+        'User'.length,
         ...rowsForDisplay.map(item => Math.min(item.rawName.length, 20)),
       ),
     );
@@ -1123,11 +1123,11 @@ class StatsTracker {
     const truncate = value => (value.length > nameWidth ? `${value.slice(0, Math.max(1, nameWidth - 3))}...` : value);
 
     const lines = [
-      `${'Names'.padEnd(nameWidth)} ${valueHeader.padStart(valueWidth)}`,
-      ...rowsForDisplay.map(item => `${truncate(item.rawName).padEnd(nameWidth)} ${item.value.padStart(valueWidth)}`),
+      `\`${'User'.padEnd(nameWidth)} ${valueHeader.padStart(valueWidth)}\``,
+      ...rowsForDisplay.map(item => `\`${truncate(item.rawName).padEnd(nameWidth)} ${item.value.padStart(valueWidth)}\``),
     ];
 
-    return `\`\`\`\n${clampFieldText(lines.join('\n'))}\n\`\`\``;
+    return clampFieldText(lines.join('\n'));
   }
 
   buildStatsControlRow(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false) {
@@ -1194,15 +1194,15 @@ class StatsTracker {
             default: activeCategory === 'messages',
           },
           {
-            label: 'VC Hours Graph',
+            label: 'Voice Activity Graph',
             value: 'voice',
-            description: panel === 'top' ? 'Compare top users by VC hours.' : 'Show this member daily VC hours.',
+            description: panel === 'top' ? 'Compare top users by voice activity.' : 'Show this member daily voice activity.',
             default: activeCategory === 'voice',
           },
           {
-            label: 'SC Hours Graph',
+            label: 'Star Citizen Activity Graph',
             value: 'starCitizen',
-            description: panel === 'top' ? 'Compare top users by SC hours.' : 'Show this member daily SC hours.',
+            description: panel === 'top' ? 'Compare top users by Star Citizen activity.' : 'Show this member daily Star Citizen activity.',
             default: activeCategory === 'starCitizen',
           },
         ];
@@ -1290,30 +1290,27 @@ class StatsTracker {
     return new EmbedBuilder().setColor(0x5865f2).setTitle(title).setThumbnail(THUMBNAIL_URL);
   }
 
+  getTopSectionName(category) {
+    if (category === 'messages') return '# Messages';
+    if (category === 'voice') return '\u{1F50A} Voice Activity';
+    if (category === 'starCitizen') return '\u{1F680} Star Citizen Activity';
+    return 'Activity';
+  }
+
   buildTopEmbed(days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
     const activeCategory = this.normalizeCategory('top', category, graphMenuEnabled);
     const board = this.getLeaderboard(days);
-
-    const totalMessages = board.all.reduce((sum, row) => sum + Number(row.messages || 0), 0);
-    const totalVoiceHours = board.all.reduce((sum, row) => sum + Number(row.voiceSeconds || 0), 0) / 3600;
-    const totalPlaytimeHours = board.all.reduce((sum, row) => sum + Number(row.starCitizenSeconds || 0), 0) / 3600;
-
-    const embed = this.buildBaseEmbed(`Server Stats - Last ${days} Day${days === 1 ? '' : 's'}`).addFields({
-        name: 'Overview',
-        value: this.formatBubbleSummary([
-          { label: 'Members', value: formatNumber(board.trackedUsers.length) },
-          { label: 'Messages', value: formatNumber(totalMessages) },
-          { label: 'VC Hours', value: `${totalVoiceHours.toFixed(1)}h` },
-          { label: 'SC Hours', value: `${totalPlaytimeHours.toFixed(1)}h` },
-        ]),
-        inline: false,
+    const embed = new EmbedBuilder()
+      .setColor(0x3b3f45)
+      .setFooter({
+        text: `Server Lookback: Last ${days} Day${days === 1 ? '' : 's'} - Timezone: UTC`,
       });
 
     if (activeCategory === 'overview') {
       embed.addFields(
-        { name: 'Messages', value: this.formatLeaderboardBubble(board.messages, 'messages', 3), inline: true },
-        { name: 'VC Hours', value: this.formatLeaderboardBubble(board.voice, 'voice', 3), inline: true },
-        { name: 'SC Hours', value: this.formatLeaderboardBubble(board.starCitizen, 'starCitizen', 3), inline: true },
+        { name: this.getTopSectionName('messages'), value: this.formatLeaderboardBubble(board.messages, 'messages', 3), inline: false },
+        { name: this.getTopSectionName('voice'), value: this.formatLeaderboardBubble(board.voice, 'voice', 3), inline: false },
+        { name: this.getTopSectionName('starCitizen'), value: this.formatLeaderboardBubble(board.starCitizen, 'starCitizen', 3), inline: false },
       );
     } else {
       const metric = this.getMetricConfig(activeCategory);
@@ -1330,7 +1327,7 @@ class StatsTracker {
       }
 
       embed.addFields({
-        name: `${metric.label} Leaders`,
+        name: this.getTopSectionName(activeCategory),
         value: this.formatLeaderboardBubble(chartRows, activeCategory, 8),
         inline: false,
       });
@@ -1366,8 +1363,8 @@ class StatsTracker {
           name: 'Summary',
           value: this.formatBubbleSummary([
             { label: 'Messages', value: formatNumber(stats.totals.messages) },
-            { label: 'VC Hours', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
-            { label: 'SC Hours', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
+            { label: 'Voice Activity', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
+            { label: 'Star Citizen Activity', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
             { label: 'Current VC Session Length', value: formatSessionLength(stats.current.voiceStartedAt) },
             { label: 'Current SC Session Length', value: formatSessionLength(stats.current.starCitizenStartedAt) },
           ]),
@@ -1377,9 +1374,8 @@ class StatsTracker {
           name: 'Rank',
           value: this.formatBubbleSummary([
             { label: 'Messages', value: `#${rankings.messages || '-'}` },
-            { label: 'VC Hours', value: `#${rankings.voice || '-'}` },
-            { label: 'SC Hours', value: `#${rankings.starCitizen || '-'}` },
-            { label: 'Tracked', value: formatNumber(rankings.totalTracked) },
+            { label: 'Voice Activity', value: `#${rankings.voice || '-'}` },
+            { label: 'Star Citizen Activity', value: `#${rankings.starCitizen || '-'}` },
           ]),
           inline: true,
         },
@@ -1405,7 +1401,7 @@ class StatsTracker {
     return { embeds: [embed], components };
   }
 
-  buildPlayersEmbed(guild, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
+  buildPlayersEmbed(guild, days = 1, category = 'overview', showTime = false, graphMenuEnabled = false) {
     const activeCategory = this.normalizeCategory('players', category, graphMenuEnabled);
     const current = this.getCurrentPlayers(guild);
     const peak = this.getPeakForRange(days);
@@ -1414,12 +1410,7 @@ class StatsTracker {
     const playerSeries = dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0));
 
     const currentPlayers = current.players.length
-      ? clampFieldText(
-          current.players
-            .slice(0, 12)
-            .map(player => `**${player.name}**\n\`${formatSessionLength(player.startedAt)} live\``)
-            .join('\n\n'),
-        )
+      ? current.players.slice(0, 12).map((player, index) => `\`${index + 1}. ${player.name}\``).join('\n')
       : 'No one currently detected in Star Citizen.';
 
     const embed = this.buildBaseEmbed(`Players - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
@@ -1433,7 +1424,7 @@ class StatsTracker {
           inline: false,
         },
         {
-          name: 'Current Players',
+          name: 'Online Now',
           value: currentPlayers,
           inline: false,
         },

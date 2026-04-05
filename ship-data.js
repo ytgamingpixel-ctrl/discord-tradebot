@@ -3,7 +3,7 @@ const DEFAULT_SHIP_DATA = {
   'C8X Pisces Expedition': { cargo: 4, military: false },
   '135c': { cargo: 6, military: false },
   '300i': { cargo: 8, military: false },
-  'Avenger Titan': { cargo: 8, military: false },
+  'Avenger Titan': { cargo: 8, military: true },
   '325a': { cargo: 4, military: false },
   '315p': { cargo: 12, military: false },
   'Cutter': { cargo: 4, military: false },
@@ -16,7 +16,7 @@ const DEFAULT_SHIP_DATA = {
   'Zeus Mk II CL': { cargo: 128, military: false },
   'Freelancer DUR': { cargo: 36, military: false },
   'Freelancer': { cargo: 66, military: false },
-  'Freelancer MIS': { cargo: 36, military: false },
+  'Freelancer MIS': { cargo: 36, military: true },
   '600i Explorer': { cargo: 44, military: false },
   '400i': { cargo: 42, military: false },
   'Cutlass Black': { cargo: 46, military: false },
@@ -31,7 +31,7 @@ const DEFAULT_SHIP_DATA = {
   'Starlancer MAX': { cargo: 224, military: false },
   'MPUV Cargo': { cargo: 2, military: false },
   'Hull B': { cargo: 384, military: false },
-  'Carrack': { cargo: 456, military: false },
+  'Carrack': { cargo: 456, military: true },
   'M2 Hercules Starlifter': { cargo: 522, military: true },
   'Starfarer': { cargo: 291, military: false },
   'Starfarer Gemini': { cargo: 291, military: true },
@@ -100,6 +100,15 @@ const SHIP_ALIASES = {
 
 const SHIP_STATS_URL = 'https://starcitizen.tools/Ship_cargo_stats';
 const CACHE_MS = 24 * 60 * 60 * 1000;
+const MILITARY_SHIP_NAMES = new Set([
+  'a2 hercules starlifter',
+  'avenger titan',
+  'carrack',
+  'freelancer mis',
+  'm2 hercules starlifter',
+  'polaris',
+  'starfarer gemini',
+]);
 
 const state = {
   shipData: { ...DEFAULT_SHIP_DATA },
@@ -122,6 +131,10 @@ function stripHtml(value) {
     .replace(/&quot;/g, '"')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function isMilitaryShipName(name) {
+  return MILITARY_SHIP_NAMES.has(normalizeText(name));
 }
 
 async function fetchLatestShipData() {
@@ -153,7 +166,7 @@ async function fetchLatestShipData() {
 
     parsed[name] = {
       cargo,
-      military: /starlifter|gemini|polaris/i.test(name),
+      military: isMilitaryShipName(name),
     };
   }
 
