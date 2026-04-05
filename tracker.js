@@ -3,11 +3,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
   StringSelectMenuBuilder,
 } = require('discord.js');
+const { Resvg } = require('@resvg/resvg-js');
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
 const MAX_DAYS = 35;
@@ -17,12 +19,342 @@ const THUMBNAIL_URL = 'https://robertsspaceindustries.com/media/zlgck6fw560rdr/l
 const TRACKED_ROLE_NAME = (process.env.TRACKED_ROLE_NAME || 'SPACEWHLE').replace(/^@/, '').trim();
 const TRACKED_ROLE_ID = process.env.TRACKED_ROLE_ID || null;
 const CHART_BG = '#2f3136';
-const CHART_TITLE = '#f5f50a';
+const CHART_TITLE = '#92927c';
 const CHART_AXIS = '#3b82f6';
 const CHART_LABELS = '#ef4444';
 const CHART_DATA = '#22c55e';
 const CHART_FILL = 'rgba(34, 197, 94, 0.22)';
 const CHART_GRID = '#4b5563';
+const PANEL_WIDTH = 1200;
+const PANEL_HEIGHT = 760;
+const TOP_PANEL_HEIGHT = 940;
+const PANEL_BG = '#1f2125';
+const PANEL_BG_ACCENT = '#272b33';
+const PANEL_CARD = '#2a2d33';
+const PANEL_CARD_ALT = '#31343b';
+const PANEL_ROW = '#383c45';
+const PANEL_STROKE = '#41454d';
+const PANEL_TEXT = '#f2f3f5';
+const PANEL_MUTED = '#b5bac1';
+const PANEL_SUBTLE = '#8e9297';
+const PANEL_GREEN = '#43b581';
+const PANEL_PINK = '#f06292';
+const PANEL_CYAN = '#22d3ee';
+const PANEL_GOLD = '#f6c453';
+const PANEL_BLUE = '#78a9ff';
+
+function escapeSvg(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function truncateLabel(value, maxLength = 24) {
+  const text = String(value || '').trim();
+  if (!text) return 'Unknown';
+  return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1))}…` : text;
+}
+
+function svgRect(x, y, width, height, radius, fill, stroke = 'none', strokeWidth = 0, opacity = 1) {
+  return `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="${radius}" fill="${fill}" opacity="${opacity}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+}
+
+function svgCircle(cx, cy, radius, fill, stroke = 'none', strokeWidth = 0, opacity = 1) {
+  return `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="${fill}" opacity="${opacity}" stroke="${stroke}" stroke-width="${strokeWidth}" />`;
+}
+
+function svgLine(x1, y1, x2, y2, stroke, strokeWidth = 1, opacity = 1, dashArray = '') {
+  return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${strokeWidth}" opacity="${opacity}"${dashArray ? ` stroke-dasharray="${dashArray}"` : ''} />`;
+}
+
+function svgText(value, x, y, options = {}) {
+  const {
+    size = 18,
+    weight = 600,
+    fill = PANEL_TEXT,
+    anchor = 'start',
+    opacity = 1,
+    family = 'Segoe UI, Arial, sans-serif',
+    letterSpacing = 0,
+  } = options;
+
+  return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}" font-weight="${weight}" text-anchor="${anchor}" dominant-baseline="middle" opacity="${opacity}" letter-spacing="${letterSpacing}">${escapeSvg(value)}</text>`;
+}
+
+function formatHoursVerbose(seconds, decimals = 2) {
+  return `${(Number(seconds || 0) / 3600).toFixed(decimals)} hours`;
+}
+
+function formatHoursShort(seconds, decimals = 1) {
+  return `${(Number(seconds || 0) / 3600).toFixed(decimals)} h`;
+}
+
+function formatMetricValue(metricKey, value, decimals = 2) {
+  if (metricKey === 'messages') return `${formatNumber(value)} messages`;
+  if (metricKey === 'voiceSeconds' || metricKey === 'starCitizenSeconds') return formatHoursVerbose(value, decimals);
+  return String(value ?? 0);
+}
+
+function buildPolylinePoints(points) {
+  return points.map(point => `${point.x},${point.y}`).join(' ');
+}
+
+function getTickIndices(total, targetCount = 4) {
+  if (total <= 0) return [];
+  if (total <= targetCount) return Array.from({ length: total }, (_, index) => index);
+
+  const values = new Set([0, total - 1]);
+  for (let step = 1; step < targetCount - 1; step += 1) {
+    values.add(Math.round(((total - 1) * step) / (targetCount - 1)));
+  }
+
+  return Array.from(values).sort((a, b) => a - b);
+}
+
+function renderIconChip(x, y, label, color, width = 42, height = 32) {
+  return [
+    svgRect(x, y, width, height, 11, color, 'none', 0),
+    svgText(label, x + width / 2, y + height / 2 + 1, {
+      size: label.length > 2 ? 13 : 15,
+      weight: 800,
+      fill: PANEL_BG,
+      anchor: 'middle',
+    }),
+  ].join('');
+}
+
+function renderDataRowsCard({ x, y, width, height, title, chipLabel, chipColor, rows }) {
+  const titleSize = title.length > 18 ? 21 : title.length > 12 ? 25 : 30;
+  const cardParts = [
+    svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    renderIconChip(x + 18, y + 16, chipLabel, chipColor, chipLabel.length > 2 ? 52 : 42, 34),
+    svgText(title, x + 82, y + 33, { size: titleSize, weight: 700 }),
+  ];
+
+  const rowHeight = 34;
+  const rowGap = 10;
+  const rowWidth = width - 32;
+  const startY = y + 62;
+
+  rows.slice(0, 3).forEach((row, index) => {
+    const rowY = startY + index * (rowHeight + rowGap);
+    cardParts.push(svgRect(x + 16, rowY, rowWidth, rowHeight, 10, PANEL_ROW));
+    cardParts.push(svgText(row.label, x + 32, rowY + rowHeight / 2, { size: 18, weight: 700 }));
+    cardParts.push(svgText(row.value, x + width - 24, rowY + rowHeight / 2, {
+      size: 18,
+      weight: 700,
+      anchor: 'end',
+      fill: PANEL_TEXT,
+    }));
+  });
+
+  return cardParts.join('');
+}
+
+function renderHeaderPill(x, y, width, label, value) {
+  return [
+    svgRect(x, y, width, 56, 16, PANEL_CARD_ALT, PANEL_STROKE, 1),
+    svgText(label, x + 16, y + 18, { size: 14, weight: 700, fill: PANEL_MUTED }),
+    svgText(value, x + 16, y + 39, { size: 18, weight: 700 }),
+  ].join('');
+}
+
+function renderAvatarBadge(x, y, initials) {
+  return [
+    svgCircle(x + 32, y + 32, 32, PANEL_BLUE),
+    svgText(initials, x + 32, y + 34, { size: 24, weight: 800, fill: PANEL_BG, anchor: 'middle' }),
+  ].join('');
+}
+
+function renderLeaderboardSection({ x, y, width, title, chipLabel, chipColor, rows, valueLabel }) {
+  const sectionParts = [
+    svgRect(x, y, width, 248, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    renderIconChip(x + 18, y + 16, chipLabel, chipColor, chipLabel.length > 2 ? 52 : 42, 34),
+    svgText(title, x + 82, y + 33, { size: 30, weight: 700 }),
+  ];
+
+  const rowWidth = width - 32;
+  const rowHeight = 48;
+  const startY = y + 62;
+
+  if (!rows.length) {
+    sectionParts.push(svgRect(x + 16, startY, rowWidth, rowHeight, 12, PANEL_ROW));
+    sectionParts.push(svgText('No tracked activity yet', x + 36, startY + rowHeight / 2, {
+      size: 20,
+      weight: 700,
+      fill: PANEL_MUTED,
+    }));
+    return sectionParts.join('');
+  }
+
+  rows.slice(0, 3).forEach((row, index) => {
+    const rowY = startY + index * 60;
+    sectionParts.push(svgRect(x + 16, rowY, rowWidth, rowHeight, 12, PANEL_ROW));
+    sectionParts.push(svgRect(x + 28, rowY + 7, 42, 34, 10, PANEL_BG_ACCENT));
+    sectionParts.push(svgText(String(index + 1), x + 49, rowY + 24, {
+      size: 19,
+      weight: 800,
+      anchor: 'middle',
+    }));
+    sectionParts.push(svgText(truncateLabel(row.name, 28), x + 92, rowY + 24, {
+      size: 23,
+      weight: 600,
+    }));
+
+    const valueText = row.value;
+    const valueBoxWidth = Math.max(118, valueText.length * 14 + 28);
+    sectionParts.push(svgRect(x + width - valueBoxWidth - 24, rowY + 8, valueBoxWidth, 32, 10, PANEL_CARD_ALT));
+    sectionParts.push(svgText(valueText, x + width - 24 - valueBoxWidth / 2, rowY + 24, {
+      size: 20,
+      weight: 800,
+      anchor: 'middle',
+    }));
+  });
+
+  sectionParts.push(svgText(valueLabel, x + width - 24, y + 33, {
+    size: 15,
+    weight: 700,
+    fill: PANEL_MUTED,
+    anchor: 'end',
+  }));
+
+  return sectionParts.join('');
+}
+
+function renderLineChartCard({ x, y, width, height, title, subtitle, labels, datasets }) {
+  const parts = [
+    svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    svgText(title, x + 20, y + 28, { size: 28, weight: 700 }),
+  ];
+
+  if (subtitle) {
+    parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED }));
+  }
+
+  let legendX = x + width - 24;
+  [...datasets].reverse().forEach(dataset => {
+    const labelWidth = Math.max(70, dataset.label.length * 10);
+    legendX -= labelWidth;
+    parts.push(svgCircle(legendX, y + 29, 8, dataset.color));
+    parts.push(svgText(dataset.label, legendX + 18, y + 30, { size: 17, weight: 700, fill: PANEL_MUTED }));
+    legendX -= 26;
+  });
+
+  const plotX = x + 24;
+  const plotY = y + 78;
+  const plotWidth = width - 48;
+  const plotHeight = height - 116;
+
+  for (let step = 0; step <= 3; step += 1) {
+    const lineY = plotY + (plotHeight * step) / 3;
+    parts.push(svgLine(plotX, lineY, plotX + plotWidth, lineY, PANEL_STROKE, 1, 0.55, '6 10'));
+  }
+
+  const hasData = datasets.some(dataset => dataset.values.some(value => Number(value) > 0));
+  if (!labels.length || !hasData) {
+    parts.push(svgText('No tracked data for this range yet', x + width / 2, y + height / 2 + 10, {
+      size: 24,
+      weight: 700,
+      fill: PANEL_MUTED,
+      anchor: 'middle',
+    }));
+    return parts.join('');
+  }
+
+  const sharedMax = Math.max(
+    1,
+    ...datasets.flatMap(dataset => dataset.values.map(value => Number(value || 0))),
+  );
+
+  datasets.forEach(dataset => {
+    const ownMax = Math.max(1, ...dataset.values.map(value => Number(value || 0)));
+    const scaleMax = dataset.normalize ? ownMax : sharedMax;
+    const points = dataset.values.map((value, index) => {
+      const progress = labels.length === 1 ? 0.5 : index / (labels.length - 1);
+      const xPos = plotX + progress * plotWidth;
+      const yPos = plotY + plotHeight - (Number(value || 0) / scaleMax) * plotHeight;
+      return {
+        x: Number(xPos.toFixed(2)),
+        y: Number(yPos.toFixed(2)),
+      };
+    });
+
+    parts.push(`<polyline fill="none" stroke="${dataset.color}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" points="${buildPolylinePoints(points)}" />`);
+
+    const lastPoint = points[points.length - 1];
+    if (lastPoint) {
+      parts.push(svgCircle(lastPoint.x, lastPoint.y, 5.5, dataset.color));
+    }
+  });
+
+  getTickIndices(labels.length, 5).forEach(index => {
+    const progress = labels.length === 1 ? 0.5 : index / (labels.length - 1);
+    const xPos = plotX + progress * plotWidth;
+    parts.push(svgText(labels[index], xPos, y + height - 24, {
+      size: 15,
+      weight: 700,
+      fill: PANEL_SUBTLE,
+      anchor: index === 0 ? 'start' : index === labels.length - 1 ? 'end' : 'middle',
+    }));
+  });
+
+  return parts.join('');
+}
+
+function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, color, valueLabel }) {
+  const parts = [
+    svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    svgText(title, x + 20, y + 28, { size: 28, weight: 700 }),
+  ];
+
+  if (subtitle) {
+    parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED }));
+  }
+
+  if (!rows.length) {
+    parts.push(svgText('No tracked data for this range yet', x + width / 2, y + height / 2, {
+      size: 24,
+      weight: 700,
+      fill: PANEL_MUTED,
+      anchor: 'middle',
+    }));
+    return parts.join('');
+  }
+
+  const maxValue = Math.max(1, ...rows.map(row => Number(row.numericValue || 0)));
+  const barAreaX = x + 210;
+  const barAreaWidth = width - 300;
+  const rowHeight = 52;
+  const rowGap = 14;
+  const startY = y + 84;
+
+  parts.push(svgText(valueLabel, x + width - 28, y + 30, {
+    size: 15,
+    weight: 700,
+    fill: PANEL_MUTED,
+    anchor: 'end',
+  }));
+
+  rows.slice(0, 8).forEach((row, index) => {
+    const rowY = startY + index * (rowHeight + rowGap);
+    parts.push(svgText(`${index + 1}. ${truncateLabel(row.name, 24)}`, x + 22, rowY + rowHeight / 2, {
+      size: 20,
+      weight: 700,
+    }));
+    parts.push(svgRect(barAreaX, rowY + 11, barAreaWidth, 30, 10, PANEL_ROW));
+    parts.push(svgRect(barAreaX, rowY + 11, Math.max(26, (barAreaWidth * Number(row.numericValue || 0)) / maxValue), 30, 10, color));
+    parts.push(svgText(row.value, x + width - 24, rowY + rowHeight / 2, {
+      size: 19,
+      weight: 800,
+      anchor: 'end',
+    }));
+  });
+
+  return parts.join('');
+}
 
 function safeReadJson(filePath, fallback) {
   try {
@@ -1077,8 +1409,8 @@ class StatsTracker {
       messages: {
         label: 'Messages',
         axisTitle: 'Messages',
-        color: '#60a5fa',
-        fillColor: 'rgba(96, 165, 250, 0.18)',
+        color: PANEL_GREEN,
+        fillColor: 'rgba(67, 181, 129, 0.18)',
         getLeaderboardValue: row => Number(row.messages || 0),
         getDailyValue: day => Number(day.messages || 0),
         formatValue: value => `${formatNumber(value)} message${Number(value) === 1 ? '' : 's'}`,
@@ -1086,17 +1418,17 @@ class StatsTracker {
       voice: {
         label: 'Voice Activity',
         axisTitle: 'Hours',
-        color: '#34d399',
-        fillColor: 'rgba(52, 211, 153, 0.18)',
+        color: PANEL_PINK,
+        fillColor: 'rgba(240, 98, 146, 0.18)',
         getLeaderboardValue: row => Number((Number(row.voiceSeconds || 0) / 3600).toFixed(2)),
         getDailyValue: day => Number(day.voiceHours || 0),
         formatValue: value => `${Number(value || 0).toFixed(1)} hours`,
       },
       starCitizen: {
-        label: 'Star Citizen Activity',
+        label: 'SC Activity',
         axisTitle: 'Hours',
-        color: '#f59e0b',
-        fillColor: 'rgba(245, 158, 11, 0.18)',
+        color: PANEL_CYAN,
+        fillColor: 'rgba(34, 211, 238, 0.18)',
         getLeaderboardValue: row => Number((Number(row.starCitizenSeconds || 0) / 3600).toFixed(2)),
         getDailyValue: day => Number(day.starCitizenHours || 0),
         formatValue: value => `${Number(value || 0).toFixed(1)} hours`,
@@ -1232,9 +1564,9 @@ class StatsTracker {
             default: activeCategory === 'voice',
           },
           {
-            label: 'Star Citizen Activity Graph',
+            label: 'SC Activity Graph',
             value: 'starCitizen',
-            description: panel === 'top' ? 'Compare top users by Star Citizen activity.' : 'Show this member daily Star Citizen activity.',
+            description: panel === 'top' ? 'Compare top users by SC activity.' : 'Show this member daily SC activity.',
             default: activeCategory === 'starCitizen',
           },
         ];
@@ -1260,8 +1592,8 @@ class StatsTracker {
           {
             label,
             data: values,
-            backgroundColor: CHART_DATA,
-            borderColor: CHART_DATA,
+            backgroundColor: color || CHART_DATA,
+            borderColor: color || CHART_DATA,
             borderWidth: 1,
             borderRadius: 14,
             borderSkipped: false,
@@ -1274,13 +1606,7 @@ class StatsTracker {
         layout: { padding: 22 },
         plugins: {
           legend: { display: false },
-          title: {
-            display: true,
-            text: label,
-            color: CHART_TITLE,
-            font: { size: 22, weight: 'bold' },
-            padding: { bottom: 18 },
-          },
+          title: { display: false },
         },
         scales: {
           x: {
@@ -1320,11 +1646,11 @@ class StatsTracker {
           {
             label,
             data: values,
-            borderColor: CHART_DATA,
-            backgroundColor: CHART_FILL,
+            borderColor: color || CHART_DATA,
+            backgroundColor: fillColor || CHART_FILL,
             fill: true,
-            pointBackgroundColor: CHART_DATA,
-            pointBorderColor: CHART_DATA,
+            pointBackgroundColor: color || CHART_DATA,
+            pointBorderColor: color || CHART_DATA,
             pointRadius: 5,
             pointHoverRadius: 6,
             borderWidth: 4,
@@ -1336,13 +1662,7 @@ class StatsTracker {
         layout: { padding: 22 },
         plugins: {
           legend: { display: false },
-          title: {
-            display: true,
-            text: label,
-            color: CHART_TITLE,
-            font: { size: 22, weight: 'bold' },
-            padding: { bottom: 18 },
-          },
+          title: { display: false },
         },
         scales: {
           x: {
@@ -1375,58 +1695,342 @@ class StatsTracker {
   }
 
   buildBaseEmbed(title) {
-    return new EmbedBuilder().setColor(0x5865f2).setTitle(title).setThumbnail(THUMBNAIL_URL);
+    return new EmbedBuilder().setColor(0x2b2d31).setTitle(title).setThumbnail(THUMBNAIL_URL);
   }
 
   getTopSectionName(category) {
-    if (category === 'messages') return '# Messages';
-    if (category === 'voice') return '\u{1F50A} Voice Activity';
-    if (category === 'starCitizen') return '\u{1F680} Star Citizen Activity';
+    if (category === 'messages') return 'Messages';
+    if (category === 'voice') return 'Voice Activity';
+    if (category === 'starCitizen') return 'SC Activity';
     return 'Activity';
+  }
+
+  getSummaryWindows() {
+    return [1, 7, 14];
+  }
+
+  formatFullDate(date) {
+    if (!date) return 'Unknown';
+    return new Date(date).toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+  }
+
+  getMemberContext(userId) {
+    for (const guild of this.client.guilds.cache.values()) {
+      const member = guild.members.cache.get(userId);
+      if (!member) continue;
+
+      const displayName = member.displayName || member.user?.username || 'Unknown User';
+      const initials = displayName
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map(part => part.charAt(0).toUpperCase())
+        .join('')
+        .slice(0, 2) || displayName.slice(0, 2).toUpperCase();
+
+      return {
+        displayName,
+        username: member.user?.username || displayName,
+        initials,
+        createdAt: member.user?.createdAt || null,
+        joinedAt: member.joinedAt || null,
+      };
+    }
+
+    const fallbackName = this.state.users?.[userId]?.username || 'Unknown User';
+    return {
+      displayName: fallbackName,
+      username: fallbackName,
+      initials: fallbackName.slice(0, 2).toUpperCase(),
+      createdAt: null,
+      joinedAt: null,
+    };
+  }
+
+  buildPanelSvg(width, height, body) {
+    return [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+      '<defs>',
+      '<linearGradient id="panelBg" x1="0" y1="0" x2="1" y2="1">',
+      `<stop offset="0%" stop-color="${PANEL_BG_ACCENT}" />`,
+      `<stop offset="100%" stop-color="${PANEL_BG}" />`,
+      '</linearGradient>',
+      '</defs>',
+      `<rect x="0" y="0" width="${width}" height="${height}" fill="url(#panelBg)" />`,
+      body,
+      '</svg>',
+    ].join('');
+  }
+
+  renderSvgAttachment(svg, name) {
+    const resvg = new Resvg(svg, {
+      fitTo: { mode: 'width', value: PANEL_WIDTH },
+      font: {
+        loadSystemFonts: true,
+        defaultFontFamily: 'Segoe UI',
+      },
+    });
+
+    return new AttachmentBuilder(resvg.render().asPng(), { name });
+  }
+
+  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer }) {
+    try {
+      const attachment = this.renderSvgAttachment(svg, attachmentName);
+      const embed = new EmbedBuilder()
+        .setColor(0x2b2d31)
+        .setImage(`attachment://${attachmentName}`);
+
+      if (title) embed.setTitle(title);
+      if (footer) embed.setFooter({ text: footer });
+
+      const payload = {
+        embeds: [embed],
+        components,
+        files: [attachment],
+        attachments: [],
+      };
+
+      if (typeof content === 'string') payload.content = content;
+      return payload;
+    } catch (error) {
+      console.error('Failed to render stats card:', error);
+      const fallback = new EmbedBuilder()
+        .setColor(0x2b2d31)
+        .setTitle(title || 'Stats')
+        .setDescription('The stats card could not be rendered right now.');
+
+      const payload = { embeds: [fallback], components, attachments: [] };
+      if (typeof content === 'string') payload.content = content;
+      return payload;
+    }
+  }
+
+  formatTopValue(row, category) {
+    if (category === 'messages') return formatNumber(row.messages);
+    if (category === 'voice') return formatHoursShort(row.voiceSeconds);
+    if (category === 'starCitizen') return formatHoursShort(row.starCitizenSeconds);
+    return '0';
+  }
+
+  getPanelVisuals(category) {
+    if (category === 'messages') return { title: 'Messages', chipLabel: '#', chipColor: PANEL_GREEN, valueLabel: 'Messages' };
+    if (category === 'voice') return { title: 'Voice Activity', chipLabel: 'VC', chipColor: PANEL_PINK, valueLabel: 'Hours' };
+    if (category === 'starCitizen') return { title: 'SC Activity', chipLabel: 'SC', chipColor: PANEL_CYAN, valueLabel: 'Hours' };
+    return { title: 'Activity', chipLabel: 'ST', chipColor: PANEL_BLUE, valueLabel: 'Value' };
+  }
+
+  buildTopPanelSvg(days, activeCategory, board) {
+    const header = [
+      svgText('Top Activity', 36, 44, { size: 44, weight: 800 }),
+      svgText(`Last ${days} Day${days === 1 ? '' : 's'} • UTC`, 36, 82, { size: 18, weight: 700, fill: PANEL_MUTED }),
+    ];
+
+    if (activeCategory === 'overview') {
+      const sections = [
+        {
+          y: 112,
+          category: 'messages',
+          rows: board.messages.slice(0, 3).map(row => ({ name: row.username, value: this.formatTopValue(row, 'messages') })),
+        },
+        {
+          y: 380,
+          category: 'voice',
+          rows: board.voice.slice(0, 3).map(row => ({ name: row.username, value: this.formatTopValue(row, 'voice') })),
+        },
+        {
+          y: 648,
+          category: 'starCitizen',
+          rows: board.starCitizen.slice(0, 3).map(row => ({ name: row.username, value: this.formatTopValue(row, 'starCitizen') })),
+        },
+      ];
+
+      const body = sections.map(section => {
+        const visuals = this.getPanelVisuals(section.category);
+        return renderLeaderboardSection({
+          x: 30,
+          y: section.y,
+          width: 1140,
+          title: visuals.title,
+          chipLabel: visuals.chipLabel,
+          chipColor: visuals.chipColor,
+          rows: section.rows,
+          valueLabel: visuals.valueLabel,
+        });
+      }).join('');
+
+      return this.buildPanelSvg(PANEL_WIDTH, TOP_PANEL_HEIGHT, `${header.join('')}${body}`);
+    }
+
+    const visuals = this.getPanelVisuals(activeCategory);
+    const metric = this.getMetricConfig(activeCategory);
+    const rows = this.getBoardRows(board, activeCategory).slice(0, 8).map(row => ({
+      name: row.username,
+      value: activeCategory === 'messages'
+        ? formatNumber(row.messages)
+        : `${Number(metric.getLeaderboardValue(row)).toFixed(1)} h`,
+      numericValue: metric.getLeaderboardValue(row),
+    }));
+
+    const chart = renderHorizontalBarCard({
+      x: 30,
+      y: 112,
+      width: 1140,
+      height: 792,
+      title: visuals.title,
+      subtitle: `Top tracked members • Last ${days} Day${days === 1 ? '' : 's'}`,
+      rows,
+      color: visuals.chipColor,
+      valueLabel: visuals.valueLabel,
+    });
+
+    return this.buildPanelSvg(PANEL_WIDTH, TOP_PANEL_HEIGHT, `${header.join('')}${chart}`);
+  }
+
+  buildUserPanelSvg(userId, days, activeCategory, stats, rankings) {
+    const context = this.getMemberContext(userId);
+    const summaryWindows = this.getSummaryWindows();
+    const messageRows = summaryWindows.map(windowDays => {
+      const windowStats = this.getUserStats(userId, windowDays);
+      return {
+        label: `${windowDays}d`,
+        value: formatMetricValue('messages', windowStats?.totals.messages || 0, 0),
+      };
+    });
+    const voiceRows = summaryWindows.map(windowDays => {
+      const windowStats = this.getUserStats(userId, windowDays);
+      return {
+        label: `${windowDays}d`,
+        value: formatMetricValue('voiceSeconds', windowStats?.totals.voiceSeconds || 0),
+      };
+    });
+    const starCitizenRows = summaryWindows.map(windowDays => {
+      const windowStats = this.getUserStats(userId, windowDays);
+      return {
+        label: `${windowDays}d`,
+        value: formatMetricValue('starCitizenSeconds', windowStats?.totals.starCitizenSeconds || 0),
+      };
+    });
+    const rankRows = [
+      { label: 'Message', value: `#${rankings.messages || '-'}` },
+      { label: 'Voice', value: `#${rankings.voice || '-'}` },
+      { label: 'SC', value: `#${rankings.starCitizen || '-'}` },
+    ];
+
+    const datasets = activeCategory === 'overview'
+      ? [
+          { label: 'Message', color: PANEL_GREEN, values: stats.daily.map(day => day.messages), normalize: true },
+          { label: 'Voice', color: PANEL_PINK, values: stats.daily.map(day => day.voiceHours), normalize: true },
+          { label: 'SC Activity', color: PANEL_CYAN, values: stats.daily.map(day => day.starCitizenHours), normalize: true },
+        ]
+      : [{
+          label: this.getTopSectionName(activeCategory),
+          color: this.getPanelVisuals(activeCategory).chipColor,
+          values: stats.daily.map(day => this.getMetricConfig(activeCategory).getDailyValue(day)),
+          normalize: false,
+        }];
+
+    const parts = [
+      renderAvatarBadge(48, 34, context.initials),
+      svgText(context.displayName, 128, 54, { size: 46, weight: 800 }),
+      svgText(`Tracked stats profile • Last ${days} Day${days === 1 ? '' : 's'}`, 128, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+      }),
+      renderHeaderPill(776, 36, 184, 'Created On', this.formatFullDate(context.createdAt)),
+      renderHeaderPill(968, 36, 184, 'Joined On', this.formatFullDate(context.joinedAt)),
+      renderDataRowsCard({ x: 48, y: 128, width: 264, height: 160, title: 'Server Ranks', chipLabel: 'RK', chipColor: PANEL_GOLD, rows: rankRows }),
+      renderDataRowsCard({ x: 328, y: 128, width: 264, height: 160, title: 'Messages', chipLabel: '#', chipColor: PANEL_GREEN, rows: messageRows }),
+      renderDataRowsCard({ x: 608, y: 128, width: 264, height: 160, title: 'Voice Activity', chipLabel: 'VC', chipColor: PANEL_PINK, rows: voiceRows }),
+      renderDataRowsCard({ x: 888, y: 128, width: 264, height: 160, title: 'SC Activity', chipLabel: 'SC', chipColor: PANEL_CYAN, rows: starCitizenRows }),
+      renderLineChartCard({
+        x: 48,
+        y: 314,
+        width: 1104,
+        height: 394,
+        title: 'Charts',
+        subtitle: `Last ${days} Day${days === 1 ? '' : 's'}`,
+        labels: stats.daily.map(day => day.label),
+        datasets,
+      }),
+    ];
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, parts.join(''));
+  }
+
+  buildServerPanelSvg(days, activeCategory, stats) {
+    const summaryWindows = this.getSummaryWindows();
+    const messageRows = summaryWindows.map(windowDays => {
+      const windowStats = this.getServerStats(windowDays);
+      return { label: `${windowDays}d`, value: formatMetricValue('messages', windowStats.totals.messages, 0) };
+    });
+    const voiceRows = summaryWindows.map(windowDays => {
+      const windowStats = this.getServerStats(windowDays);
+      return { label: `${windowDays}d`, value: formatMetricValue('voiceSeconds', windowStats.totals.voiceSeconds) };
+    });
+    const starCitizenRows = summaryWindows.map(windowDays => {
+      const windowStats = this.getServerStats(windowDays);
+      return { label: `${windowDays}d`, value: formatMetricValue('starCitizenSeconds', windowStats.totals.starCitizenSeconds) };
+    });
+
+    const datasets = activeCategory === 'overview'
+      ? [
+          { label: 'Message', color: PANEL_GREEN, values: stats.daily.map(day => day.messages), normalize: true },
+          { label: 'Voice', color: PANEL_PINK, values: stats.daily.map(day => day.voiceHours), normalize: true },
+          { label: 'SC Activity', color: PANEL_CYAN, values: stats.daily.map(day => day.starCitizenHours), normalize: true },
+        ]
+      : [{
+          label: this.getTopSectionName(activeCategory),
+          color: this.getPanelVisuals(activeCategory).chipColor,
+          values: stats.daily.map(day => this.getMetricConfig(activeCategory).getDailyValue(day)),
+          normalize: false,
+        }];
+
+    const parts = [
+      svgText('Server Activity', 48, 52, { size: 46, weight: 800 }),
+      svgText(`Tracked totals • Last ${days} Day${days === 1 ? '' : 's'}`, 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+      }),
+      renderHeaderPill(950, 36, 202, 'Timezone', 'UTC'),
+      renderDataRowsCard({ x: 48, y: 128, width: 352, height: 160, title: 'Messages', chipLabel: '#', chipColor: PANEL_GREEN, rows: messageRows }),
+      renderDataRowsCard({ x: 424, y: 128, width: 352, height: 160, title: 'Voice Activity', chipLabel: 'VC', chipColor: PANEL_PINK, rows: voiceRows }),
+      renderDataRowsCard({ x: 800, y: 128, width: 352, height: 160, title: 'SC Activity', chipLabel: 'SC', chipColor: PANEL_CYAN, rows: starCitizenRows }),
+      renderLineChartCard({
+        x: 48,
+        y: 314,
+        width: 1104,
+        height: 394,
+        title: 'Charts',
+        subtitle: `Last ${days} Day${days === 1 ? '' : 's'}`,
+        labels: stats.daily.map(day => day.label),
+        datasets,
+      }),
+    ];
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, parts.join(''));
   }
 
   buildTopEmbed(days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
     const activeCategory = this.normalizeCategory('top', category, graphMenuEnabled);
     const board = this.getLeaderboard(days);
-    const embed = new EmbedBuilder()
-      .setColor(0x3b3f45)
-      .setTitle(`Top Activity - Last ${days} Day${days === 1 ? '' : 's'}`)
-      .setFooter({
-        text: `Server Lookback: Last ${days} Day${days === 1 ? '' : 's'} - Timezone: UTC`,
-      });
-
-    if (activeCategory === 'overview') {
-      embed.addFields(
-        { name: this.getTopSectionName('messages'), value: this.formatLeaderboardBubble(board.messages, 'messages', 3), inline: false },
-        { name: this.getTopSectionName('voice'), value: this.formatLeaderboardBubble(board.voice, 'voice', 3), inline: false },
-        { name: this.getTopSectionName('starCitizen'), value: this.formatLeaderboardBubble(board.starCitizen, 'starCitizen', 3), inline: false },
-      );
-    } else {
-      const metric = this.getMetricConfig(activeCategory);
-      const chartRows = this.getBoardRows(board, activeCategory).slice(0, 8);
-
-      if (chartRows.length) {
-        embed.setImage(this.buildLeaderboardChartUrl({
-          labels: chartRows.map(row => row.username),
-          values: chartRows.map(row => metric.getLeaderboardValue(row)),
-          label: metric.label,
-          color: metric.color,
-          axisTitle: metric.axisTitle,
-        }));
-      }
-
-      embed.addFields({
-        name: this.getTopSectionName(activeCategory),
-        value: this.formatLeaderboardBubble(chartRows, activeCategory, 8),
-        inline: false,
-      });
-    }
-
     const components = [this.buildStatsControlRow('top', 'global', days, activeCategory, showTime, graphMenuEnabled)];
     if (showTime) components.push(this.buildRangeButtons('top', 'global', days, activeCategory, true, graphMenuEnabled));
     components.push(this.buildCategorySelectRow('top', 'global', days, activeCategory, showTime, graphMenuEnabled));
 
-    return { embeds: [embed], components };
+    return this.buildImagePanelResponse({
+      title: `Top Activity - Last ${days} Day${days === 1 ? '' : 's'}`,
+      footer: `Server Lookback: Last ${days} Day${days === 1 ? '' : 's'} - Timezone: UTC`,
+      svg: this.buildTopPanelSvg(days, activeCategory, board),
+      attachmentName: `top-${days}-${activeCategory}.png`,
+      components,
+    });
   }
 
   buildUserStatsEmbed(userId, days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
@@ -1443,91 +2047,33 @@ class StatsTracker {
         content: 'No tracked data for that user yet.',
         embeds: [],
         components,
+        attachments: [],
       };
     }
 
     const rankings = this.getUserRankings(userId, days);
-    const embed = this.buildBaseEmbed(`@${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
-        {
-          name: 'Summary',
-          value: this.formatBubbleSummary([
-            { label: 'Messages', value: formatNumber(stats.totals.messages) },
-            { label: 'Voice Activity', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
-            { label: 'Star Citizen Activity', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
-          ]),
-          inline: true,
-        },
-        {
-          name: 'Rank',
-          value: this.formatBubbleSummary([
-            { label: 'Messages', value: `#${rankings.messages || '-'}` },
-            { label: 'Voice Activity', value: `#${rankings.voice || '-'}` },
-            { label: 'Star Citizen Activity', value: `#${rankings.starCitizen || '-'}` },
-          ]),
-          inline: true,
-        },
-      );
 
-    if (activeCategory !== 'overview') {
-      const metric = this.getMetricConfig(activeCategory);
-      const labels = stats.daily.map(day => day.label);
-      const values = stats.daily.map(day => metric.getDailyValue(day));
-
-      if (labels.length) {
-        embed.setImage(this.buildTrendChartUrl({
-          labels,
-          values,
-          label: metric.label,
-          color: metric.color,
-          fillColor: metric.fillColor,
-          axisTitle: metric.axisTitle,
-        }));
-      }
-    }
-
-    return {
-      content: `<@${userId}>`,
-      embeds: [embed],
+    return this.buildImagePanelResponse({
+      content: `<@${userId}> - Last ${days} Day${days === 1 ? '' : 's'}`,
+      svg: this.buildUserPanelSvg(userId, days, activeCategory, stats, rankings),
+      attachmentName: `stats-user-${userId}-${days}-${activeCategory}.png`,
       components,
-    };
+    });
   }
 
   buildServerStatsEmbed(days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
     const activeCategory = this.normalizeCategory('server', category, graphMenuEnabled);
     const stats = this.getServerStats(days);
-
     const components = [this.buildStatsControlRow('server', 'global', days, activeCategory, showTime, graphMenuEnabled)];
     if (showTime) components.push(this.buildRangeButtons('server', 'global', days, activeCategory, true, graphMenuEnabled));
     components.push(this.buildCategorySelectRow('server', 'global', days, activeCategory, showTime, graphMenuEnabled));
 
-    const embed = this.buildBaseEmbed(`Server - Last ${days} Day${days === 1 ? '' : 's'}`).addFields({
-      name: 'Summary',
-      value: this.formatBubbleSummary([
-        { label: 'Messages', value: formatNumber(stats.totals.messages) },
-        { label: 'Voice Activity', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
-        { label: 'Star Citizen Activity', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
-      ]),
-      inline: false,
+    return this.buildImagePanelResponse({
+      title: `Server Activity - Last ${days} Day${days === 1 ? '' : 's'}`,
+      svg: this.buildServerPanelSvg(days, activeCategory, stats),
+      attachmentName: `server-${days}-${activeCategory}.png`,
+      components,
     });
-
-    if (activeCategory !== 'overview') {
-      const metric = this.getMetricConfig(activeCategory);
-      const labels = stats.daily.map(day => day.label);
-      const values = stats.daily.map(day => metric.getDailyValue(day));
-
-      if (labels.length) {
-        embed.setImage(this.buildTrendChartUrl({
-          labels,
-          values,
-          label: metric.label,
-          color: metric.color,
-          fillColor: metric.fillColor,
-          axisTitle: metric.axisTitle,
-        }));
-      }
-    }
-
-    return { embeds: [embed], components };
   }
 
   buildPlayersEmbed(guild, days = 1, category = 'overview', showTime = false, graphMenuEnabled = false) {

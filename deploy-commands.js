@@ -118,17 +118,22 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('top')
-    .setDescription('Show leaderboards for voice hours, messages, and Star Citizen time')
+    .setDescription('Show leaderboards for voice activity, messages, and SC activity')
     .toJSON(),
 
   new SlashCommandBuilder()
     .setName('stats')
-    .setDescription('Show tracked stats for one server member')
-    .addUserOption(option =>
-      option
+    .setDescription('Tracked stats commands')
+    .addSubcommand(subcommand =>
+      subcommand
         .setName('user')
-        .setDescription('Member to inspect, for example @gerald')
-        .setRequired(true)
+        .setDescription('Show tracked stats for one server member')
+        .addUserOption(option =>
+          option
+            .setName('user')
+            .setDescription('Member to inspect, for example @gerald')
+            .setRequired(true)
+        )
     )
     .toJSON(),
 

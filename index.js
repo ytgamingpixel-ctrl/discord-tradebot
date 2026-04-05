@@ -1434,8 +1434,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'stats') {
       await interaction.deferReply();
-      const user = interaction.options.getUser('user', true);
-      await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+      if (interaction.options.getSubcommand(false) === 'user') {
+        const user = interaction.options.getUser('user', true);
+        await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+      }
       return;
     }
 
