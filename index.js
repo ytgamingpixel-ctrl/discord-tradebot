@@ -1439,6 +1439,12 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    if (interaction.commandName === 'server') {
+      await interaction.deferReply();
+      await interaction.editReply(tracker.buildServerStatsEmbed(7));
+      return;
+    }
+
     if (interaction.commandName === 'ship') {
       await interaction.deferReply();
       await ensureShipData(false);

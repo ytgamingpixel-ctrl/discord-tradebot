@@ -727,6 +727,35 @@ class StatsTracker {
     };
   }
 
+  getServerStats(days = 7) {
+    const board = this.getLeaderboard(days);
+
+    const daily = board.dayKeys.map(dayKey => ({
+      dayKey,
+      label: formatDisplayDate(dayKey),
+      messages: board.trackedUsers.reduce((sum, user) => sum + Number(user.messages?.[dayKey] || 0), 0),
+      voiceHours: Number(
+        (
+          board.trackedUsers.reduce((sum, user) => sum + Number(user.voiceSeconds?.[dayKey] || 0), 0) / 3600
+        ).toFixed(2),
+      ),
+      starCitizenHours: Number(
+        (
+          board.trackedUsers.reduce((sum, user) => sum + Number(user.starCitizenSeconds?.[dayKey] || 0), 0) / 3600
+        ).toFixed(2),
+      ),
+    }));
+
+    return {
+      totals: {
+        messages: daily.reduce((sum, day) => sum + Number(day.messages || 0), 0),
+        voiceSeconds: board.all.reduce((sum, row) => sum + Number(row.voiceSeconds || 0), 0),
+        starCitizenSeconds: board.all.reduce((sum, row) => sum + Number(row.starCitizenSeconds || 0), 0),
+      },
+      daily,
+    };
+  }
+
   getUserRankings(userId, days) {
     const board = this.getLeaderboard(days);
     return {
@@ -1168,12 +1197,6 @@ class StatsTracker {
     const options = panel === 'players'
       ? [
           {
-            label: 'Overview',
-            value: 'overview',
-            description: 'Show the live and recent player summary.',
-            default: activeCategory === 'overview',
-          },
-          {
             label: 'Players Graph',
             value: 'players',
             description: 'Show the peak player chart for the range.',
@@ -1181,12 +1204,14 @@ class StatsTracker {
           },
         ]
       : [
-          {
-            label: 'Overview',
-            value: 'overview',
-            description: panel === 'top' ? 'Show the leaderboard overview cards.' : 'Show this member summary only.',
-            default: activeCategory === 'overview',
-          },
+          ...(panel === 'top'
+            ? [{
+                label: 'Overview',
+                value: 'overview',
+                description: 'Show the leaderboard overview cards.',
+                default: activeCategory === 'overview',
+              }]
+            : []),
           {
             label: 'Messages Graph',
             value: 'messages',
@@ -1211,13 +1236,10 @@ class StatsTracker {
       new StringSelectMenuBuilder()
         .setCustomId(encodeStatsSelectMenu(panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
         .setPlaceholder(
-          graphMenuEnabled
-            ? 'Choose view'
-            : 'Press 📊 to enable graphs',
+          panel === 'top' ? 'Choose view' : 'Choose graph',
         )
         .setMinValues(1)
         .setMaxValues(1)
-        .setDisabled(!graphMenuEnabled)
         .addOptions(options),
     );
   }
@@ -1302,6 +1324,7 @@ class StatsTracker {
     const board = this.getLeaderboard(days);
     const embed = new EmbedBuilder()
       .setColor(0x3b3f45)
+      .setTitle(`Top Activity - Last ${days} Day${days === 1 ? '' : 's'}`)
       .setFooter({
         text: `Server Lookback: Last ${days} Day${days === 1 ? '' : 's'} - Timezone: UTC`,
       });
@@ -1358,15 +1381,13 @@ class StatsTracker {
     }
 
     const rankings = this.getUserRankings(userId, days);
-    const embed = this.buildBaseEmbed(`${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
+    const embed = this.buildBaseEmbed(`@${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
         {
           name: 'Summary',
           value: this.formatBubbleSummary([
             { label: 'Messages', value: formatNumber(stats.totals.messages) },
             { label: 'Voice Activity', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
             { label: 'Star Citizen Activity', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
-            { label: 'Current VC Session Length', value: formatSessionLength(stats.current.voiceStartedAt) },
-            { label: 'Current SC Session Length', value: formatSessionLength(stats.current.starCitizenStartedAt) },
           ]),
           inline: true,
         },
@@ -1380,6 +1401,48 @@ class StatsTracker {
           inline: true,
         },
       );
+
+    if (activeCategory !== 'overview') {
+      const metric = this.getMetricConfig(activeCategory);
+      const labels = stats.daily.map(day => day.label);
+      const values = stats.daily.map(day => metric.getDailyValue(day));
+
+      if (labels.length) {
+        embed.setImage(this.buildTrendChartUrl({
+          labels,
+          values,
+          label: metric.label,
+          color: metric.color,
+          fillColor: metric.fillColor,
+          axisTitle: metric.axisTitle,
+        }));
+      }
+    }
+
+    return {
+      content: `<@${userId}>`,
+      embeds: [embed],
+      components,
+    };
+  }
+
+  buildServerStatsEmbed(days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
+    const activeCategory = this.normalizeCategory('server', category, graphMenuEnabled);
+    const stats = this.getServerStats(days);
+
+    const components = [this.buildStatsControlRow('server', 'global', days, activeCategory, showTime, graphMenuEnabled)];
+    if (showTime) components.push(this.buildRangeButtons('server', 'global', days, activeCategory, true, graphMenuEnabled));
+    components.push(this.buildCategorySelectRow('server', 'global', days, activeCategory, showTime, graphMenuEnabled));
+
+    const embed = this.buildBaseEmbed(`Server - Last ${days} Day${days === 1 ? '' : 's'}`).addFields({
+      name: 'Summary',
+      value: this.formatBubbleSummary([
+        { label: 'Messages', value: formatNumber(stats.totals.messages) },
+        { label: 'Voice Activity', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
+        { label: 'Star Citizen Activity', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
+      ]),
+      inline: false,
+    });
 
     if (activeCategory !== 'overview') {
       const metric = this.getMetricConfig(activeCategory);
@@ -1452,6 +1515,7 @@ class StatsTracker {
   buildPanel(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false, guild = null) {
     if (panel === 'top') return this.buildTopEmbed(days, category, showTime, graphMenuEnabled);
     if (panel === 'user') return this.buildUserStatsEmbed(targetId, days, category, showTime, graphMenuEnabled);
+    if (panel === 'server') return this.buildServerStatsEmbed(days, category, showTime, graphMenuEnabled);
     if (panel === 'players') return this.buildPlayersEmbed(guild, days, category, showTime, graphMenuEnabled);
     return null;
   }

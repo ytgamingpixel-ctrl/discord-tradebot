@@ -133,6 +133,11 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
+    .setName('server')
+    .setDescription('Show total tracked server activity stats')
+    .toJSON(),
+
+  new SlashCommandBuilder()
     .setName('ship')
     .setDescription('Show cargo information for a ship')
     .addStringOption(option =>
