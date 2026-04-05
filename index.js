@@ -13,9 +13,26 @@ const {
   ActionRowBuilder,
 } = require('discord.js');
 
+const { StatsTracker } = require('./tracker');
+const {
+  ensureShipData,
+  getShipChoices,
+  getShipProfile,
+  getShipSourceLabel,
+} = require('./ship-data');
+
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
 });
+
+const tracker = new StatsTracker(client);
+tracker.init();
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -26,106 +43,6 @@ const EMBED_BANNER_URL =
   'https://s1.cdn.autoevolution.com/images/news/star-citizen-unveils-a-massive-space-hauler-crowdfunding-passes-400-million-175169_1.jpg';
 
 const STATE_FILE = path.join(__dirname, 'route-state.json');
-
-const SHIP_DATA = {
-  'Aurora Mk II': { cargo: 2, military: false },
-  'C8X Pisces Expedition': { cargo: 4, military: false },
-  '135c': { cargo: 6, military: false },
-  '300i': { cargo: 8, military: false },
-  'Avenger Titan': { cargo: 8, military: false },
-  '325a': { cargo: 8, military: false },
-  '315p': { cargo: 12, military: false },
-  'Cutter': { cargo: 4, military: false },
-  'Cutter Rambler': { cargo: 4, military: false },
-  'Nomad': { cargo: 24, military: false },
-  'Reliant Kore': { cargo: 6, military: false },
-  'Apollo Medivac': { cargo: 32, military: false },
-  'Apollo Triage': { cargo: 32, military: false },
-  'Zeus Mk II ES': { cargo: 32, military: false },
-  'Zeus Mk II CL': { cargo: 128, military: false },
-  'Freelancer DUR': { cargo: 36, military: false },
-  'Freelancer': { cargo: 66, military: false },
-  'Freelancer MIS': { cargo: 36, military: false },
-  '600i Explorer': { cargo: 40, military: false },
-  '400i': { cargo: 42, military: false },
-  'Cutlass Black': { cargo: 46, military: false },
-  'C1 Spirit': { cargo: 64, military: false },
-  'Hull A': { cargo: 64, military: false },
-  'Corsair': { cargo: 72, military: false },
-  'Mercury Star Runner': { cargo: 114, military: false },
-  'Freelancer MAX': { cargo: 120, military: false },
-  'Constellation Taurus': { cargo: 168, military: false },
-  'RAFT': { cargo: 192, military: false },
-  'A2 Hercules Starlifter': { cargo: 216, military: true },
-  'Starlancer MAX': { cargo: 224, military: false },
-  'MPUV Cargo': { cargo: 2, military: false },
-  'Hull B': { cargo: 384, military: false },
-  'Carrack': { cargo: 456, military: false },
-  'M2 Hercules Starlifter': { cargo: 468, military: true },
-  'Starfarer': { cargo: 291, military: false },
-  'Starfarer Gemini': { cargo: 291, military: true },
-  'Polaris': { cargo: 576, military: true },
-  'C2 Hercules Starlifter': { cargo: 696, military: false },
-  'Hull C': { cargo: 4608, military: false },
-};
-
-const SHIP_ALIASES = {
-  aurora: 'Aurora Mk II',
-  pisces: 'C8X Pisces Expedition',
-  c8x: 'C8X Pisces Expedition',
-  '135c': '135c',
-  '300i': '300i',
-  titan: 'Avenger Titan',
-  avenger: 'Avenger Titan',
-  '325a': '325a',
-  '315p': '315p',
-  cutter: 'Cutter',
-  rambler: 'Cutter Rambler',
-  'cutter rambler': 'Cutter Rambler',
-  nomad: 'Nomad',
-  kore: 'Reliant Kore',
-  'reliant kore': 'Reliant Kore',
-  apollo: 'Apollo Medivac',
-  'apollo medivac': 'Apollo Medivac',
-  'apollo triage': 'Apollo Triage',
-  'zeus es': 'Zeus Mk II ES',
-  'zeus cl': 'Zeus Mk II CL',
-  'zeus mk ii cl': 'Zeus Mk II CL',
-  'zeus mk ii es': 'Zeus Mk II ES',
-  'freelancer dur': 'Freelancer DUR',
-  freelancer: 'Freelancer',
-  'freelancer mis': 'Freelancer MIS',
-  '600i': '600i Explorer',
-  '600i explorer': '600i Explorer',
-  '400i': '400i',
-  cutlass: 'Cutlass Black',
-  'cutlass black': 'Cutlass Black',
-  c1: 'C1 Spirit',
-  'c1 spirit': 'C1 Spirit',
-  'hull a': 'Hull A',
-  corsair: 'Corsair',
-  msr: 'Mercury Star Runner',
-  mercury: 'Mercury Star Runner',
-  'mercury star runner': 'Mercury Star Runner',
-  'freelancer max': 'Freelancer MAX',
-  taurus: 'Constellation Taurus',
-  'constellation taurus': 'Constellation Taurus',
-  raft: 'RAFT',
-  a2: 'A2 Hercules Starlifter',
-  'starlancer max': 'Starlancer MAX',
-  starlancer: 'Starlancer MAX',
-  mpuv: 'MPUV Cargo',
-  'mpuv cargo': 'MPUV Cargo',
-  'hull b': 'Hull B',
-  carrack: 'Carrack',
-  m2: 'M2 Hercules Starlifter',
-  starfarer: 'Starfarer',
-  gemini: 'Starfarer Gemini',
-  'starfarer gemini': 'Starfarer Gemini',
-  polaris: 'Polaris',
-  c2: 'C2 Hercules Starlifter',
-  'hull c': 'Hull C',
-};
 
 const cache = {
   lastUpdated: 0,
@@ -227,56 +144,6 @@ function saveRouteState(state, existingId = null) {
 function getRouteState(stateId) {
   cleanupRouteStates();
   return routeStates.get(stateId) || null;
-}
-
-function normalizeShipName(input) {
-  const cleaned = normalizeText(input);
-  if (SHIP_ALIASES[cleaned]) return SHIP_ALIASES[cleaned];
-
-  const exact = Object.keys(SHIP_DATA).find(name => normalizeText(name) === cleaned);
-  if (exact) return exact;
-
-  const partial = Object.keys(SHIP_DATA).find(name => normalizeText(name).includes(cleaned));
-  return partial || null;
-}
-
-function getShipProfile(shipName) {
-  const name = normalizeShipName(shipName);
-  if (!name || !SHIP_DATA[name]) return null;
-
-  const base = SHIP_DATA[name];
-  let cargoTier = 'small';
-  let shipRiskModifier = 0;
-
-  if (base.cargo <= 8) {
-    cargoTier = 'tiny';
-    shipRiskModifier = 8;
-  } else if (base.cargo <= 32) {
-    cargoTier = 'small';
-    shipRiskModifier = 4;
-  } else if (base.cargo <= 72) {
-    cargoTier = 'medium';
-    shipRiskModifier = 1;
-  } else if (base.cargo <= 192) {
-    cargoTier = 'large';
-    shipRiskModifier = -2;
-  } else if (base.cargo <= 696) {
-    cargoTier = 'heavy';
-    shipRiskModifier = -4;
-  } else {
-    cargoTier = 'super-heavy';
-    shipRiskModifier = -6;
-  }
-
-  if (base.military) shipRiskModifier -= 8;
-
-  return {
-    name,
-    cargo: base.cargo,
-    military: base.military,
-    cargoTier,
-    shipRiskModifier,
-  };
 }
 
 function getRiskLabel(score) {
@@ -646,7 +513,6 @@ function findMatchingGroup(locationInput) {
     null
   );
 }
-
 function getDockingPreferenceBonus(route) {
   let bonus = 0;
 
@@ -731,7 +597,7 @@ function chooseBestRoute(scoredRoutes, previousSignature = null) {
 }
 
 async function findBestRoute({ cargo, shipName, location, finish, budget, previousSignature = null }) {
-  await loadMarketData(false);
+  await Promise.all([loadMarketData(false), ensureShipData(false)]);
 
   const ship = getShipProfile(shipName);
   if (!ship) throw new Error('Invalid ship.');
@@ -782,8 +648,8 @@ async function handleAutocomplete(interaction) {
   const focused = interaction.options.getFocused(true);
 
   if (focused.name === 'ship') {
-    const shipChoices = Object.keys(SHIP_DATA).sort((a, b) => a.localeCompare(b));
-    await interaction.respond(pickAutocompleteChoices(shipChoices, focused.value));
+    await ensureShipData(false);
+    await interaction.respond(pickAutocompleteChoices(getShipChoices(), focused.value));
     return;
   }
 
@@ -944,6 +810,7 @@ async function buildRouteResponse(params, existingStateId = null) {
     { name: 'Time', value: route.time.label, inline: true },
     { name: 'Buy Stock', value: route.buyStock ? `${route.buyStock.toLocaleString()} SCU` : 'Unknown', inline: true },
     { name: 'Sell Demand', value: route.sellDemand ? `${route.sellDemand.toLocaleString()} SCU` : 'Unknown', inline: true },
+    { name: 'Ship Data Source', value: getShipSourceLabel(), inline: false },
     { name: 'Risk Reasons', value: route.riskReasons, inline: false },
   ];
 
@@ -965,7 +832,6 @@ async function buildRouteResponse(params, existingStateId = null) {
     stateId,
   };
 }
-
 async function handleRouteButton(interaction, action, stateId) {
   const state = getRouteState(stateId);
 
@@ -1020,8 +886,12 @@ async function handleRouteButton(interaction, action, stateId) {
   }
 }
 
-client.once(Events.ClientReady, readyClient => {
+client.once(Events.ClientReady, async readyClient => {
   loadStateStoreFromDisk();
+  await ensureShipData(false);
+  for (const guild of readyClient.guilds.cache.values()) {
+    await tracker.hydrateGuild(guild);
+  }
   console.log(`Logged in as ${readyClient.user.tag}`);
 });
 
@@ -1039,17 +909,25 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.isButton()) {
-    const [prefix, action, stateId] = interaction.customId.split(':');
-    if (prefix !== 'route') return;
+    const parts = interaction.customId.split(':');
 
     try {
       await interaction.deferUpdate();
-      await handleRouteButton(interaction, action, stateId);
+
+      if (parts[0] === 'route') {
+        await handleRouteButton(interaction, parts[1], parts[2]);
+        return;
+      }
+
+      if (parts[0] === 'stats') {
+        await tracker.handleButton(interaction);
+        return;
+      }
     } catch (error) {
-      console.error('Route button error:', error);
+      console.error('Button error:', error);
       try {
         await interaction.followUp({
-          content: 'Could not update that route.',
+          content: 'Could not update that panel.',
           ephemeral: true,
         });
       } catch {}
@@ -1086,6 +964,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'best-routes') {
       await interaction.deferReply();
+      await ensureShipData(false);
 
       const shipName = interaction.options.getString('ship', true);
       const ship = getShipProfile(shipName);
@@ -1132,7 +1011,7 @@ client.on(Events.InteractionCreate, async interaction => {
           { name: 'Ship Cargo', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
         )
         .setFooter({
-          text: 'SPACEWHLE Trade Command • bracket summary',
+          text: `SPACEWHLE Trade Command • bracket summary • ${getShipSourceLabel()}`,
         });
 
       await interaction.editReply({ embeds: [embed] });
@@ -1181,8 +1060,7 @@ client.on(Events.InteractionCreate, async interaction => {
       await interaction.editReply({ embeds: [embed] });
       return;
     }
-
-    if (interaction.commandName === 'buyers') {
+        if (interaction.commandName === 'buyers') {
       await interaction.deferReply();
       await loadMarketData(false);
 
@@ -1235,6 +1113,51 @@ client.on(Events.InteractionCreate, async interaction => {
         .setFooter({
           text: 'SPACEWHLE Trade Command • top 5 buyers',
         });
+
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+
+    if (interaction.commandName === 'players') {
+      await interaction.deferReply();
+      await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
+      return;
+    }
+
+    if (interaction.commandName === 'top') {
+      await interaction.deferReply();
+      await interaction.editReply(tracker.buildTopEmbed(7));
+      return;
+    }
+
+    if (interaction.commandName === 'stats') {
+      await interaction.deferReply();
+      const user = interaction.options.getUser('user', true);
+      await interaction.editReply(tracker.buildUserStatsEmbed(user.id, 7));
+      return;
+    }
+
+    if (interaction.commandName === 'ship') {
+      await interaction.deferReply();
+      await ensureShipData(false);
+      const shipName = interaction.options.getString('ship', true);
+      const ship = getShipProfile(shipName);
+      if (!ship) {
+        await interaction.editReply({ content: 'I could not find that ship.' });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x8b5cf6)
+        .setTitle(ship.name)
+        .setThumbnail(EMBED_THUMBNAIL_URL)
+        .addFields(
+          { name: 'Cargo capacity', value: `${ship.cargo.toLocaleString()} SCU`, inline: true },
+          { name: 'Military hull', value: ship.military ? 'Yes' : 'No', inline: true },
+          { name: 'Cargo tier', value: ship.cargoTier, inline: true },
+          { name: 'Ship data source', value: getShipSourceLabel(), inline: false },
+        )
+        .setFooter({ text: 'Live pull attempted first, then fallback ship data.' });
 
       await interaction.editReply({ embeds: [embed] });
       return;

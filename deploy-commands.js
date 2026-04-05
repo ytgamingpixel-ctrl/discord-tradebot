@@ -110,6 +110,39 @@ const commands = [
         .setAutocomplete(true)
     )
     .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('players')
+    .setDescription('Show who is currently detected playing Star Citizen and recent peaks')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('top')
+    .setDescription('Show leaderboards for voice hours, messages, and Star Citizen time')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('stats')
+    .setDescription('Show tracked stats for one server member')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('Member to inspect, for example @gerald')
+        .setRequired(true)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('ship')
+    .setDescription('Show cargo information for a ship')
+    .addStringOption(option =>
+      option
+        .setName('ship')
+        .setDescription('Ship name')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .toJSON(),
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
