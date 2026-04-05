@@ -1098,16 +1098,36 @@ class StatsTracker {
   formatLeaderboardBubble(rows, category, limit = 5) {
     const metric = this.getMetricConfig(category);
     const top = rows.slice(0, limit);
-    if (!metric || !top.length) return 'No data yet.';
+    if (!metric || !top.length) return '```\nNo data yet.\n```';
 
-    return clampFieldText(
-      top
-        .map((row, index) => {
-          const value = metric.formatValue(metric.getLeaderboardValue(row));
-          return `**${index + 1}. ${row.username}**\n\`${value}\``;
-        })
-        .join('\n\n'),
+    const valueHeader = category === 'messages' ? 'Messages' : category === 'players' ? 'Players' : 'Hours';
+    const rowsForDisplay = top.map((row, index) => {
+      const rawName = `${index + 1}. ${String(row.username || 'Unknown User').trim()}`;
+      const value = category === 'messages'
+        ? formatNumber(row.messages)
+        : category === 'players'
+          ? formatNumber(row.players || 0)
+          : Number(metric.getLeaderboardValue(row)).toFixed(1);
+
+      return { rawName, value };
+    });
+
+    const nameWidth = Math.min(
+      20,
+      Math.max(
+        'Names'.length,
+        ...rowsForDisplay.map(item => Math.min(item.rawName.length, 20)),
+      ),
     );
+    const valueWidth = Math.max(valueHeader.length, ...rowsForDisplay.map(item => item.value.length));
+    const truncate = value => (value.length > nameWidth ? `${value.slice(0, Math.max(1, nameWidth - 3))}...` : value);
+
+    const lines = [
+      `${'Names'.padEnd(nameWidth)} ${valueHeader.padStart(valueWidth)}`,
+      ...rowsForDisplay.map(item => `${truncate(item.rawName).padEnd(nameWidth)} ${item.value.padStart(valueWidth)}`),
+    ];
+
+    return `\`\`\`\n${clampFieldText(lines.join('\n'))}\n\`\`\``;
   }
 
   buildStatsControlRow(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false) {
@@ -1116,11 +1136,11 @@ class StatsTracker {
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(encodeStatsButton('refresh', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
-        .setLabel('Refresh')
+        .setEmoji('\u{1F504}')
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId(encodeStatsButton('time', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
-        .setLabel('Days')
+        .setEmoji('\u{1F552}')
         .setStyle(showTime ? ButtonStyle.Primary : ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId(encodeStatsButton('graph', panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
@@ -1192,8 +1212,8 @@ class StatsTracker {
         .setCustomId(encodeStatsSelectMenu(panel, targetId, days, activeCategory, showTime, graphMenuEnabled))
         .setPlaceholder(
           graphMenuEnabled
-            ? 'Switch between overview and graph views'
-            : 'Press the graph button to unlock graphs',
+            ? 'Choose view'
+            : 'Press 📊 to enable graphs',
         )
         .setMinValues(1)
         .setMaxValues(1)
@@ -1278,28 +1298,22 @@ class StatsTracker {
     const totalVoiceHours = board.all.reduce((sum, row) => sum + Number(row.voiceSeconds || 0), 0) / 3600;
     const totalPlaytimeHours = board.all.reduce((sum, row) => sum + Number(row.starCitizenSeconds || 0), 0) / 3600;
 
-    const embed = this.buildBaseEmbed(`Server Stats - Last ${days} Day${days === 1 ? '' : 's'}`)
-      .setDescription(
-        activeCategory === 'overview'
-          ? 'Overview cards are shown by default. Use the graph button below when you want a chart.'
-          : `Showing the ${this.getMetricConfig(activeCategory)?.label.toLowerCase()} graph for this range.`,
-      )
-      .addFields({
+    const embed = this.buildBaseEmbed(`Server Stats - Last ${days} Day${days === 1 ? '' : 's'}`).addFields({
         name: 'Overview',
         value: this.formatBubbleSummary([
-          { label: 'Tracked Members', value: formatNumber(board.trackedUsers.length) },
+          { label: 'Members', value: formatNumber(board.trackedUsers.length) },
           { label: 'Messages', value: formatNumber(totalMessages) },
-          { label: 'VC Hours', value: `${totalVoiceHours.toFixed(1)} hours` },
-          { label: 'SC Hours', value: `${totalPlaytimeHours.toFixed(1)} hours` },
+          { label: 'VC Hours', value: `${totalVoiceHours.toFixed(1)}h` },
+          { label: 'SC Hours', value: `${totalPlaytimeHours.toFixed(1)}h` },
         ]),
         inline: false,
       });
 
     if (activeCategory === 'overview') {
       embed.addFields(
-        { name: 'Messages', value: this.formatLeaderboardBubble(board.messages, 'messages'), inline: true },
-        { name: 'VC Hours', value: this.formatLeaderboardBubble(board.voice, 'voice'), inline: true },
-        { name: 'SC Hours', value: this.formatLeaderboardBubble(board.starCitizen, 'starCitizen'), inline: true },
+        { name: 'Messages', value: this.formatLeaderboardBubble(board.messages, 'messages', 3), inline: true },
+        { name: 'VC Hours', value: this.formatLeaderboardBubble(board.voice, 'voice', 3), inline: true },
+        { name: 'SC Hours', value: this.formatLeaderboardBubble(board.starCitizen, 'starCitizen', 3), inline: true },
       );
     } else {
       const metric = this.getMetricConfig(activeCategory);
@@ -1347,23 +1361,17 @@ class StatsTracker {
     }
 
     const rankings = this.getUserRankings(userId, days);
-    const embed = this.buildBaseEmbed(`${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`)
-      .setDescription(
-        activeCategory === 'overview'
-          ? 'Only this member has been shown here.'
-          : `Showing only ${stats.username}'s ${this.getMetricConfig(activeCategory)?.label.toLowerCase()} trend.`,
-      )
-      .addFields(
+    const embed = this.buildBaseEmbed(`${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
         {
           name: 'Summary',
           value: this.formatBubbleSummary([
             { label: 'Messages', value: formatNumber(stats.totals.messages) },
-            { label: 'VC Hours', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)} hours` },
-            { label: 'SC Hours', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)} hours` },
-            { label: 'VC Live', value: formatSessionLength(stats.current.voiceStartedAt) },
-            { label: 'SC Live', value: formatSessionLength(stats.current.starCitizenStartedAt) },
+            { label: 'VC Hours', value: `${(stats.totals.voiceSeconds / 3600).toFixed(1)}h` },
+            { label: 'SC Hours', value: `${(stats.totals.starCitizenSeconds / 3600).toFixed(1)}h` },
+            { label: 'Current VC Session Length', value: formatSessionLength(stats.current.voiceStartedAt) },
+            { label: 'Current SC Session Length', value: formatSessionLength(stats.current.starCitizenStartedAt) },
           ]),
-          inline: false,
+          inline: true,
         },
         {
           name: 'Rank',
@@ -1373,7 +1381,7 @@ class StatsTracker {
             { label: 'SC Hours', value: `#${rankings.starCitizen || '-'}` },
             { label: 'Tracked', value: formatNumber(rankings.totalTracked) },
           ]),
-          inline: false,
+          inline: true,
         },
       );
 
@@ -1414,13 +1422,7 @@ class StatsTracker {
         )
       : 'No one currently detected in Star Citizen.';
 
-    const embed = this.buildBaseEmbed(`Players - Last ${days} Day${days === 1 ? '' : 's'}`)
-      .setDescription(
-        activeCategory === 'overview'
-          ? 'Live player info is shown by default.'
-          : 'Showing the player peak graph for this range.',
-      )
-      .addFields(
+    const embed = this.buildBaseEmbed(`Players - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
         {
           name: 'Overview',
           value: this.formatBubbleSummary([
