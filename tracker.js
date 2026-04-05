@@ -2770,8 +2770,8 @@ class StatsTracker {
     return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, `${header.join('')}${body}`);
   }
 
-  buildBracketRoutesPanelSvg({ ship, location, finish, sourceLabel, brackets }) {
-    const title = `Bracket Routes - ${ship.name}`;
+  buildBracketRoutesPanelSvg({ location, finish, brackets }) {
+    const title = `Bracket Routes - ${location || 'All Starts'}`;
     const titleFit = fitTextToWidth(title, PANEL_CONTENT_WIDTH, {
       size: 42,
       minSize: 30,
@@ -2803,8 +2803,8 @@ class StatsTracker {
       }),
       renderMetricPill(PANEL_CONTENT_X, 118, PANEL_PILL_WIDTH, 'Start', location || 'Any', PANEL_BLUE),
       renderMetricPill(PANEL_CONTENT_X + PANEL_PILL_WIDTH + PANEL_PILL_GAP, 118, PANEL_PILL_WIDTH, 'Finish', finish || 'Any', PANEL_PINK),
-      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Ship Cargo', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
-      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Data Source', sourceLabel, PANEL_GOLD),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 2), 118, PANEL_PILL_WIDTH, 'Brackets', formatNumber(brackets.length), PANEL_GREEN),
+      renderMetricPill(PANEL_CONTENT_X + ((PANEL_PILL_WIDTH + PANEL_PILL_GAP) * 3), 118, PANEL_PILL_WIDE_WIDTH, 'Mode', 'Cargo bracket scan', PANEL_GOLD),
       renderListRowsCard({
         x: PANEL_CONTENT_X,
         y: 214,
@@ -3020,11 +3020,12 @@ class StatsTracker {
   }
 
   buildBracketRoutesEmbed(payload) {
+    const locationSlug = String(payload.location || 'all-starts').toLowerCase().replace(/[^a-z0-9]+/g, '-');
     return this.buildImagePanelResponse({
-      title: `Bracket Routes - ${payload.ship.name}`,
+      title: `Bracket Routes - ${payload.location || 'All Starts'}`,
       footer: 'SPACEWHLE Trade Command - ranked by profit, confidence, liquidity, and route quality',
       svg: this.buildBracketRoutesPanelSvg(payload),
-      attachmentName: `best-routes-${payload.ship.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
+      attachmentName: `best-routes-${locationSlug}.png`,
       components: [],
     });
   }

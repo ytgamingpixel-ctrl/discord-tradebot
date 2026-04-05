@@ -1332,8 +1332,43 @@ function findMatchingGroup(locationInput) {
   );
 }
 
+function createSyntheticShipProfile(cargo, label = null) {
+  const capacity = Math.max(1, Math.round(Number(cargo || 0)));
+  let cargoTier = 'small';
+  let shipRiskModifier = 0;
+
+  if (capacity <= 8) {
+    cargoTier = 'tiny';
+    shipRiskModifier = 8;
+  } else if (capacity <= 32) {
+    cargoTier = 'small';
+    shipRiskModifier = 4;
+  } else if (capacity <= 72) {
+    cargoTier = 'medium';
+    shipRiskModifier = 1;
+  } else if (capacity <= 192) {
+    cargoTier = 'large';
+    shipRiskModifier = -2;
+  } else if (capacity <= 696) {
+    cargoTier = 'heavy';
+    shipRiskModifier = -4;
+  } else {
+    cargoTier = 'super-heavy';
+    shipRiskModifier = -6;
+  }
+
+  return {
+    name: label || `${capacity} SCU bracket`,
+    cargo: capacity,
+    military: false,
+    cargoTier,
+    shipRiskModifier,
+  };
+}
+
 function scoreRoute(route, desiredCargo, shipName, budget = null, options = {}) {
-  const ship = getShipProfile(shipName);
+  const ship = options.shipProfile || getShipProfile(shipName);
+  if (!ship) return null;
   const {
     hint = null,
     ranking = getCommodityRanking(route),
@@ -1430,10 +1465,11 @@ function chooseBestRoute(scoredRoutes, previousSignature = null) {
   return scoredRoutes[0];
 }
 
-async function findBestRoute({ cargo, shipName, location, finish, budget, previousSignature = null }) {
-  await Promise.all([loadMarketData(false), ensureShipData(false)]);
+async function findBestRoute({ cargo, shipName, shipProfile = null, location, finish, budget, previousSignature = null }) {
+  await loadMarketData(false);
+  if (!shipProfile) await ensureShipData(false);
 
-  const ship = getShipProfile(shipName);
+  const ship = shipProfile || getShipProfile(shipName);
   if (!ship) throw new Error('Invalid ship.');
 
   const desiredCargo = cargo || ship.cargo;
@@ -1447,7 +1483,7 @@ async function findBestRoute({ cargo, shipName, location, finish, budget, previo
   });
 
   const preliminaryRoutes = filteredRoutes
-    .map(route => scoreRoute(route, desiredCargo, ship.name, budget || null))
+    .map(route => scoreRoute(route, desiredCargo, ship.name, budget || null, { shipProfile: ship }))
     .filter(Boolean)
     .sort((a, b) => b.rankingScore - a.rankingScore);
 
@@ -1468,6 +1504,7 @@ async function findBestRoute({ cargo, shipName, location, finish, budget, previo
       const hintKey = `${Number(route.buyTerminalId || 0)}|${Number(route.sellTerminalId || 0)}`;
       const hint = hintMaps.get(Number(route.commodityId || 0))?.get(hintKey) || null;
       return scoreRoute(route, desiredCargo, ship.name, budget || null, {
+        shipProfile: ship,
         hint,
         ranking: route.ranking,
       });
@@ -1910,41 +1947,49 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (interaction.commandName === 'best-routes') {
       await interaction.deferReply();
-      await ensureShipData(false);
-
-      const shipName = interaction.options.getString('ship', true);
-      const ship = getShipProfile(shipName);
-
-      if (!ship) {
-        await interaction.editReply({ content: 'Invalid ship.' });
-        return;
-      }
+      await loadMarketData(false);
 
       const locationInput = interaction.options.getString('location');
       const finishInput = interaction.options.getString('finish');
-      const bracketResults = [];
 
-      for (const bracket of getBracketCaps()) {
+      if (!locationInput) {
+        await interaction.editReply({ content: 'Choose a starting location for `/best-routes`.' });
+        return;
+      }
+
+      const startGroup = findMatchingGroup(locationInput);
+      const finishGroup = finishInput ? findMatchingGroup(finishInput) : null;
+
+      if (!startGroup) {
+        await interaction.editReply({ content: 'I could not find that starting location.' });
+        return;
+      }
+
+      if (finishInput && !finishGroup) {
+        await interaction.editReply({ content: 'I could not find that finishing location.' });
+        return;
+      }
+
+      const bracketResults = await Promise.all(getBracketCaps().map(async bracket => {
+        const bracketShip = createSyntheticShipProfile(bracket.cargo, `${bracket.name} bracket`);
         const result = await findBestRoute({
-          shipName,
-          cargo: Math.min(bracket.cargo, ship.cargo),
-          location: locationInput || null,
-          finish: finishInput || null,
+          cargo: bracket.cargo,
+          shipProfile: bracketShip,
+          location: startGroup.shortName,
+          finish: finishGroup?.shortName || null,
           budget: null,
         });
 
-        bracketResults.push({
+        return {
           name: bracket.name,
           cargo: bracket.cargo,
           route: result.route || null,
-        });
-      }
+        };
+      }));
 
       await interaction.editReply(tracker.buildBracketRoutesEmbed({
-        ship,
-        location: locationInput || null,
-        finish: finishInput || null,
-        sourceLabel: getShipSourceLabel(),
+        location: startGroup.shortName,
+        finish: finishGroup?.shortName || null,
         brackets: bracketResults,
       }));
       return;

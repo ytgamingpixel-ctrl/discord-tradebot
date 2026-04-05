@@ -49,19 +49,12 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('best-routes')
-    .setDescription('Show the best route for each cargo bracket')
-    .addStringOption(option =>
-      option
-        .setName('ship')
-        .setDescription('Ship name')
-        .setRequired(true)
-        .setAutocomplete(true)
-    )
+    .setDescription('Show the best route for each cargo bracket from a starting location')
     .addStringOption(option =>
       option
         .setName('location')
-        .setDescription('Optional starting location')
-        .setRequired(false)
+        .setDescription('Required starting location')
+        .setRequired(true)
         .setAutocomplete(true)
     )
     .addStringOption(option =>
