@@ -316,13 +316,13 @@ function renderLineChartCard({ x, y, width, height, title, subtitle, labels, dat
     parts.push(svgText(subtitle, x + 20, y + 56, { size: 16, weight: 600, fill: PANEL_MUTED, family: FONT_DISPLAY, style: 'italic' }));
   }
 
-  let legendX = x + width - 24;
+  let legendX = x + width - 28;
   [...datasets].reverse().forEach(dataset => {
-    const labelWidth = Math.max(70, dataset.label.length * 10);
+    const labelWidth = Math.max(90, dataset.label.length * 11);
     legendX -= labelWidth;
     parts.push(svgCircle(legendX, y + 29, 8, dataset.color));
-    parts.push(svgText(dataset.label, legendX + 18, y + 30, { size: 17, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }));
-    legendX -= 26;
+    parts.push(svgText(dataset.label, legendX + 22, y + 30, { size: 17, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }));
+    legendX -= 40;
   });
 
   const showYAxis = Boolean(yAxisLabel);
@@ -1642,6 +1642,12 @@ class StatsTracker {
     const options = panel === 'players'
       ? [
           {
+            label: 'Overview',
+            value: 'overview',
+            description: 'Return to the default overview card.',
+            default: activeCategory === 'overview',
+          },
+          {
             label: 'Players Graph',
             value: 'players',
             description: 'Show the peak player chart for the range.',
@@ -1649,14 +1655,12 @@ class StatsTracker {
           },
         ]
       : [
-          ...(panel === 'top'
-            ? [{
-                label: 'Overview',
-                value: 'overview',
-                description: 'Show the leaderboard overview cards.',
-                default: activeCategory === 'overview',
-              }]
-            : []),
+          {
+            label: 'Overview',
+            value: 'overview',
+            description: panel === 'top' ? 'Show the leaderboard overview cards.' : 'Return to the default overview card.',
+            default: activeCategory === 'overview',
+          },
           {
             label: 'Messages Graph',
             value: 'messages',
