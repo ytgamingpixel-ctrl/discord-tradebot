@@ -43,9 +43,9 @@ const CHART_DATA = '#22c55e';
 const CHART_FILL = 'rgba(34, 197, 94, 0.22)';
 const CHART_GRID = '#4b5563';
 const PANEL_WIDTH = 1200;
-const PANEL_HEIGHT = 760;
-const TOP_PANEL_HEIGHT = 940;
-const PANEL_RENDER_SCALE = 0.9;
+const PANEL_HEIGHT = 820;
+const TOP_PANEL_HEIGHT = 990;
+const PANEL_RENDER_SCALE = 1;
 const PANEL_RENDER_WIDTH = Math.round(PANEL_WIDTH * PANEL_RENDER_SCALE);
 const PANEL_BG = '#1f2125';
 const PANEL_BG_ACCENT = '#272b33';
@@ -63,6 +63,8 @@ const PANEL_GOLD = '#f6c453';
 const PANEL_BLUE = '#78a9ff';
 const FONT_UI = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', Arial, sans-serif";
 const FONT_DISPLAY = "'DejaVu Sans', 'Noto Sans', 'Liberation Sans', Arial, sans-serif";
+const PANEL_FRAME_MARGIN = 10;
+const PANEL_FRAME_RADIUS = 34;
 
 function escapeSvg(value) {
   return String(value ?? '')
@@ -163,6 +165,26 @@ function renderIconChip(x, y, iconType, color, width = 42, height = 32) {
     parts.push(svgPath(`M ${x + 24} ${y + 12} C ${x + 28} ${y + 12} ${x + 28} ${y + 18} ${x + 24} ${y + 18}`, 'none', iconFill, 2));
     parts.push(svgRect(x + 16, y + 21, 4, 5, 1, iconFill));
     parts.push(svgRect(x + 13, y + 27, 10, 3, 1.5, iconFill));
+  } else if (iconType === 'route') {
+    parts.push(svgCircle(x + 11, y + 16, 3.5, iconFill));
+    parts.push(svgCircle(x + 28, y + 16, 3.5, iconFill));
+    parts.push(svgPath(`M ${x + 15} ${y + 16} H ${x + 25}`, 'none', iconFill, 2.6));
+    parts.push(svgPath(`M ${x + 22} ${y + 12} L ${x + 28} ${y + 16} L ${x + 22} ${y + 20}`, 'none', iconFill, 2.6));
+  } else if (iconType === 'cargo') {
+    parts.push(svgRect(x + 11, y + 10, 16, 14, 3, iconFill));
+    parts.push(svgPath(`M ${x + 11} ${y + 14} H ${x + 27}`, 'none', color, 1.6));
+    parts.push(svgPath(`M ${x + 19} ${y + 10} V ${y + 24}`, 'none', color, 1.6));
+  } else if (iconType === 'location') {
+    parts.push(svgPath(`M ${x + 19} ${y + 8} C ${x + 13} ${y + 8} ${x + 9} ${y + 12} ${x + 9} ${y + 18} C ${x + 9} ${y + 24} ${x + 19} ${y + 29} ${x + 19} ${y + 29} C ${x + 19} ${y + 29} ${x + 29} ${y + 24} ${x + 29} ${y + 18} C ${x + 29} ${y + 12} ${x + 25} ${y + 8} ${x + 19} ${y + 8} Z`, iconFill));
+    parts.push(svgCircle(x + 19, y + 18, 4, color));
+  } else if (iconType === 'ship') {
+    parts.push(svgPath(`M ${x + 10} ${y + 20} L ${x + 15} ${y + 14} H ${x + 23} L ${x + 28} ${y + 20} L ${x + 24} ${y + 24} H ${x + 14} Z`, iconFill));
+    parts.push(svgPath(`M ${x + 17} ${y + 14} L ${x + 19} ${y + 9} L ${x + 21} ${y + 14}`, iconFill));
+  } else if (iconType === 'players') {
+    parts.push(svgCircle(x + 15, y + 14, 4, iconFill));
+    parts.push(svgCircle(x + 24, y + 16, 3.5, iconFill, 'none', 0, 0.9));
+    parts.push(svgPath(`M ${x + 9} ${y + 26} C ${x + 9} ${y + 21} ${x + 21} ${y + 21} ${x + 21} ${y + 26}`, 'none', iconFill, 2.5));
+    parts.push(svgPath(`M ${x + 19} ${y + 26} C ${x + 19} ${y + 22} ${x + 28} ${y + 22} ${x + 28} ${y + 26}`, 'none', iconFill, 2.1, 0.85));
   } else {
     parts.push(svgText('#', x + width / 2, y + height / 2 + 1, {
       size: 16,
@@ -184,8 +206,8 @@ function renderDataRowsCard({ x, y, width, height, title, chipType, chipColor, r
     svgText(title, x + 66, y + 29, { size: titleSize, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
-  const rowHeight = 24;
-  const rowGap = 6;
+  const rowHeight = 28;
+  const rowGap = 8;
   const rowWidth = width - 24;
   const startY = y + 58;
 
@@ -248,14 +270,14 @@ function renderAvatarBadge(x, y, initials, avatarDataUri = null, clipId = 'user-
 
 function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, rows, valueLabel }) {
   const sectionParts = [
-    svgRect(x, y, width, 248, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    svgRect(x, y, width, 260, 24, PANEL_CARD, PANEL_STROKE, 1.2),
     renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
     svgText(title, x + 66, y + 29, { size: 28, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
   ];
 
   const rowWidth = width - 32;
-  const rowHeight = 48;
-  const startY = y + 62;
+  const rowHeight = 50;
+  const startY = y + 66;
 
   if (!rows.length) {
     sectionParts.push(svgRect(x + 16, startY, rowWidth, rowHeight, 12, PANEL_ROW));
@@ -268,7 +290,7 @@ function renderLeaderboardSection({ x, y, width, title, chipType, chipColor, row
   }
 
   rows.slice(0, 3).forEach((row, index) => {
-    const rowY = startY + index * 60;
+    const rowY = startY + index * 62;
     sectionParts.push(svgRect(x + 16, rowY, rowWidth, rowHeight, 12, PANEL_ROW));
     sectionParts.push(svgRect(x + 28, rowY + 7, 42, 34, 10, PANEL_BG_ACCENT));
     sectionParts.push(svgText(String(index + 1), x + 49, rowY + 24, {
@@ -460,6 +482,148 @@ function renderHorizontalBarCard({ x, y, width, height, title, subtitle, rows, c
       anchor: 'end',
       family: FONT_DISPLAY,
     }));
+  });
+
+  return parts.join('');
+}
+
+function renderMetricPill(x, y, width, label, value, accent = PANEL_BLUE) {
+  const safeLabel = truncateLabel(label, Math.max(10, Math.floor(width / 12)));
+  const safeValue = truncateLabel(value, Math.max(10, Math.floor(width / 10)));
+  return [
+    svgRect(x, y, width, 74, 18, PANEL_CARD_ALT, PANEL_STROKE, 1),
+    svgRect(x + 14, y + 14, 6, 46, 3, accent),
+    svgText(safeLabel, x + 32, y + 24, { size: 13, weight: 700, fill: PANEL_MUTED, family: FONT_DISPLAY }),
+    svgText(safeValue, x + 32, y + 48, { size: 24, weight: 800, family: FONT_DISPLAY }),
+  ].join('');
+}
+
+function renderKeyValueCard({
+  x,
+  y,
+  width,
+  height,
+  title,
+  subtitle = null,
+  chipType = 'messages',
+  chipColor = PANEL_BLUE,
+  rows = [],
+  rowHeight = 38,
+}) {
+  const parts = [
+    svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
+    svgText(title, x + 66, y + 29, { size: 26, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+  ];
+
+  if (subtitle) {
+    parts.push(svgText(subtitle, x + 20, y + 56, {
+      size: 15,
+      weight: 600,
+      fill: PANEL_MUTED,
+      family: FONT_DISPLAY,
+      style: 'italic',
+    }));
+  }
+
+  const startY = y + (subtitle ? 74 : 58);
+  const rowGap = 10;
+  const maxRows = Math.max(1, Math.floor((height - (startY - y) - 16) / (rowHeight + rowGap)));
+
+  rows.slice(0, maxRows).forEach((row, index) => {
+    const rowY = startY + index * (rowHeight + rowGap);
+    parts.push(svgRect(x + 14, rowY, width - 28, rowHeight, 10, PANEL_ROW));
+    parts.push(svgText(truncateLabel(row.label, 32), x + 26, rowY + rowHeight / 2, {
+      size: 16,
+      weight: 700,
+      fill: PANEL_MUTED,
+      family: FONT_DISPLAY,
+      style: 'italic',
+    }));
+    parts.push(svgText(truncateLabel(row.value, 22), x + width - 24, rowY + rowHeight / 2, {
+      size: 17,
+      weight: 800,
+      anchor: 'end',
+      family: FONT_DISPLAY,
+    }));
+  });
+
+  return parts.join('');
+}
+
+function renderListRowsCard({
+  x,
+  y,
+  width,
+  height,
+  title,
+  subtitle = null,
+  chipType = 'messages',
+  chipColor = PANEL_BLUE,
+  rows = [],
+  rowHeight = 56,
+}) {
+  const parts = [
+    svgRect(x, y, width, height, 24, PANEL_CARD, PANEL_STROKE, 1.2),
+    renderIconChip(x + 18, y + 14, chipType, chipColor, 38, 28),
+    svgText(title, x + 66, y + 29, { size: 26, weight: 700, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+  ];
+
+  if (subtitle) {
+    parts.push(svgText(subtitle, x + 20, y + 56, {
+      size: 15,
+      weight: 600,
+      fill: PANEL_MUTED,
+      family: FONT_DISPLAY,
+      style: 'italic',
+    }));
+  }
+
+  const startY = y + (subtitle ? 74 : 58);
+  const rowGap = 10;
+  const maxRows = Math.max(1, Math.floor((height - (startY - y) - 16) / (rowHeight + rowGap)));
+
+  rows.slice(0, maxRows).forEach((row, index) => {
+    const rowY = startY + index * (rowHeight + rowGap);
+    const valueText = String(row.value || '').trim();
+    const valueBoxWidth = valueText ? Math.max(112, Math.min(180, valueText.length * 12 + 28)) : 0;
+    const valueAreaOffset = valueBoxWidth ? valueBoxWidth + 34 : 28;
+    parts.push(svgRect(x + 14, rowY, width - 28, rowHeight, 12, PANEL_ROW));
+    parts.push(svgText(truncateLabel(row.primary, 32), x + 28, rowY + 18, {
+      size: 17,
+      weight: 800,
+      family: FONT_DISPLAY,
+      style: 'italic',
+    }));
+
+    if (row.secondary) {
+      parts.push(svgText(truncateLabel(row.secondary, valueText ? 36 : 48), x + 28, rowY + 40, {
+        size: 13,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+      }));
+    }
+
+    if (valueText) {
+      parts.push(svgRect(x + width - valueBoxWidth - 22, rowY + 12, valueBoxWidth, rowHeight - 24, 10, PANEL_CARD_ALT));
+      parts.push(svgText(truncateLabel(valueText, 18), x + width - 22 - valueBoxWidth / 2, rowY + rowHeight / 2, {
+        size: 15,
+        weight: 800,
+        anchor: 'middle',
+        family: FONT_DISPLAY,
+      }));
+    }
+
+    if (row.tertiary) {
+      parts.push(svgText(truncateLabel(row.tertiary, 18), x + width - valueAreaOffset, rowY + 40, {
+        size: 12,
+        weight: 700,
+        fill: PANEL_SUBTLE,
+        anchor: 'end',
+        family: FONT_DISPLAY,
+      }));
+    }
   });
 
   return parts.join('');
@@ -1664,19 +1828,19 @@ class StatsTracker {
           {
             label: 'Messages Graph',
             value: 'messages',
-            description: panel === 'top' ? 'Compare top users by messages.' : 'Show this member daily messages.',
+            description: panel === 'top' ? 'Compare top users by messages.' : 'Show this member messages.',
             default: activeCategory === 'messages',
           },
           {
             label: 'Voice Activity Graph',
             value: 'voice',
-            description: panel === 'top' ? 'Compare top users by voice activity.' : 'Show this member daily voice activity.',
+            description: panel === 'top' ? 'Compare top users by voice activity.' : 'Show this member voice activity.',
             default: activeCategory === 'voice',
           },
           {
             label: 'SC Activity Graph',
             value: 'starCitizen',
-            description: panel === 'top' ? 'Compare top users by SC activity.' : 'Show this member daily SC activity.',
+            description: panel === 'top' ? 'Compare top users by SC activity.' : 'Show this member SC activity.',
             default: activeCategory === 'starCitizen',
           },
         ];
@@ -1896,6 +2060,10 @@ class StatsTracker {
   buildPanelSvg(width, height, body) {
     const renderWidth = Math.round(width * PANEL_RENDER_SCALE);
     const renderHeight = Math.round(height * PANEL_RENDER_SCALE);
+    const frameX = PANEL_FRAME_MARGIN;
+    const frameY = PANEL_FRAME_MARGIN;
+    const frameWidth = width - PANEL_FRAME_MARGIN * 2;
+    const frameHeight = height - PANEL_FRAME_MARGIN * 2;
 
     return [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${renderWidth}" height="${renderHeight}" viewBox="0 0 ${width} ${height}">`,
@@ -1904,8 +2072,12 @@ class StatsTracker {
       `<stop offset="0%" stop-color="${PANEL_BG_ACCENT}" />`,
       `<stop offset="100%" stop-color="${PANEL_BG}" />`,
       '</linearGradient>',
+      '<filter id="panelShadow" x="-10%" y="-10%" width="120%" height="120%">',
+      '<feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#000000" flood-opacity="0.28" />',
+      '</filter>',
       '</defs>',
-      `<rect x="0" y="0" width="${width}" height="${height}" fill="url(#panelBg)" />`,
+      `<rect x="${frameX}" y="${frameY}" width="${frameWidth}" height="${frameHeight}" rx="${PANEL_FRAME_RADIUS}" fill="url(#panelBg)" stroke="${PANEL_STROKE}" stroke-width="1.6" filter="url(#panelShadow)" />`,
+      `<rect x="${frameX + 1}" y="${frameY + 1}" width="${frameWidth - 2}" height="${frameHeight - 2}" rx="${PANEL_FRAME_RADIUS - 1}" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="1" />`,
       body,
       '</svg>',
     ].join('');
@@ -1948,9 +2120,6 @@ class StatsTracker {
       const embed = new EmbedBuilder()
         .setColor(0x2b2d31)
         .setImage(`attachment://${attachmentName}`);
-
-      if (title) embed.setTitle(title);
-      if (footer) embed.setFooter({ text: footer });
 
       const payload = {
         embeds: [embed],
@@ -2004,12 +2173,12 @@ class StatsTracker {
           rows: board.messages.slice(0, 3).map(row => ({ name: row.username, value: this.formatTopValue(row, 'messages') })),
         },
         {
-          y: 380,
+          y: 394,
           category: 'voice',
           rows: board.voice.slice(0, 3).map(row => ({ name: row.username, value: this.formatTopValue(row, 'voice') })),
         },
         {
-          y: 648,
+          y: 676,
           category: 'starCitizen',
           rows: board.starCitizen.slice(0, 3).map(row => ({ name: row.username, value: this.formatTopValue(row, 'starCitizen') })),
         },
@@ -2046,7 +2215,7 @@ class StatsTracker {
       x: 30,
       y: 112,
       width: 1140,
-      height: 792,
+      height: 850,
       title: visuals.title,
       subtitle: `Top tracked members - Last ${days} Day${days === 1 ? '' : 's'}`,
       rows,
@@ -2120,9 +2289,9 @@ class StatsTracker {
       renderDataRowsCard({ x: 888, y: 128, width: 264, height: 160, title: 'SC Activity', chipType: 'starCitizen', chipColor: PANEL_CYAN, rows: starCitizenRows }),
       renderLineChartCard({
         x: 48,
-        y: 314,
+        y: 324,
         width: 1104,
-        height: 394,
+        height: 448,
         title: 'Charts',
         subtitle: `Last ${days} Day${days === 1 ? '' : 's'}`,
         labels: stats.daily.map(day => day.label),
@@ -2181,9 +2350,9 @@ class StatsTracker {
       renderDataRowsCard({ x: 800, y: 128, width: 352, height: 160, title: 'SC Activity', chipType: 'starCitizen', chipColor: PANEL_CYAN, rows: starCitizenRows }),
       renderLineChartCard({
         x: 48,
-        y: 314,
+        y: 324,
         width: 1104,
-        height: 394,
+        height: 448,
         title: 'Charts',
         subtitle: `Last ${days} Day${days === 1 ? '' : 's'}`,
         labels: stats.daily.map(day => day.label),
@@ -2196,6 +2365,457 @@ class StatsTracker {
     ];
 
     return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, parts.join(''));
+  }
+
+  buildPlayersPanelSvg(guild, days, activeCategory, current, peak, labels, playerSeries) {
+    const guildName = guild?.name || 'Server';
+    const playerRows = current.players.length
+      ? current.players.slice(0, 8).map(player => ({
+          primary: player.name,
+          secondary: 'Currently online in Star Citizen',
+        }))
+      : [{
+          primary: 'No tracked players online',
+          secondary: 'No one is currently detected in Star Citizen',
+        }];
+
+    const header = [
+      svgText('Players', 48, 52, { size: 46, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`${guildName} - Last ${days} Day${days === 1 ? '' : 's'}`, 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
+      }),
+      renderMetricPill(48, 118, 250, 'Live Now', formatNumber(current.count), PANEL_BLUE),
+      renderMetricPill(314, 118, 250, 'Peak', formatNumber(peak.count || 0), '#a78bfa'),
+      renderMetricPill(580, 118, 250, 'Peak Time', peak.ts ? new Date(peak.ts).toLocaleDateString('en-GB') : 'No data', PANEL_GOLD),
+      renderMetricPill(846, 118, 306, 'Range', `${days} day${days === 1 ? '' : 's'}`, PANEL_CYAN),
+    ];
+
+    const datasets = [{
+      label: 'Players',
+      color: '#a78bfa',
+      values: playerSeries,
+      normalize: false,
+    }];
+
+    if (activeCategory === 'players') {
+      const body = [
+        renderLineChartCard({
+          x: 48,
+          y: 214,
+          width: 1104,
+          height: 500,
+          title: 'Peak Trend',
+          subtitle: `Tracked player peaks across the last ${days} day${days === 1 ? '' : 's'}`,
+          labels,
+          datasets,
+          yAxisLabel: 'Players',
+          tickFormatter: value => formatNumber(Math.round(Number(value || 0))),
+        }),
+        renderListRowsCard({
+          x: 48,
+          y: 730,
+          width: 1104,
+          height: 174,
+          title: 'Online Now',
+          subtitle: 'Compact live list',
+          chipType: 'players',
+          chipColor: PANEL_BLUE,
+          rows: playerRows.slice(0, 3),
+          rowHeight: 44,
+        }),
+      ].join('');
+
+      return this.buildPanelSvg(PANEL_WIDTH, TOP_PANEL_HEIGHT, `${header.join('')}${body}`);
+    }
+
+    const body = [
+      renderListRowsCard({
+        x: 48,
+        y: 214,
+        width: 430,
+        height: 736,
+        title: 'Online Now',
+        subtitle: 'Compact live list',
+        chipType: 'players',
+        chipColor: PANEL_BLUE,
+        rows: playerRows,
+        rowHeight: 56,
+      }),
+      renderLineChartCard({
+        x: 502,
+        y: 214,
+        width: 650,
+        height: 736,
+        title: 'Peak Trend',
+        subtitle: `Tracked player peaks across the last ${days} day${days === 1 ? '' : 's'}`,
+        labels,
+        datasets,
+        yAxisLabel: 'Players',
+        tickFormatter: value => formatNumber(Math.round(Number(value || 0))),
+      }),
+    ].join('');
+
+    return this.buildPanelSvg(PANEL_WIDTH, TOP_PANEL_HEIGHT, `${header.join('')}${body}`);
+  }
+
+  buildTradeRoutePanelSvg(route, historyBundle, rationale = []) {
+    const header = [
+      svgText(`Best Route - ${route.shipProfile.name}`, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`${route.buyShortGroup} -> ${route.sellShortGroup}`, 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
+      }),
+      renderMetricPill(48, 118, 202, 'Investment', `${formatNumber(Math.round(route.cargoValue))} aUEC`, PANEL_BLUE),
+      renderMetricPill(266, 118, 202, 'Gross Profit', `${formatNumber(Math.round(route.totalProfit))} aUEC`, PANEL_GREEN),
+      renderMetricPill(484, 118, 202, 'Expected Profit', `${formatNumber(Math.round(route.expectedProfit || 0))} aUEC`, PANEL_GOLD),
+      renderMetricPill(702, 118, 202, 'ROI', `${route.profitPercent.toFixed(1)}%`, PANEL_PINK),
+      renderMetricPill(920, 118, 232, 'Confidence', `${Math.round((route.confidenceScore || 0) * 100)}% ${route.confidenceLabel}`, PANEL_CYAN),
+    ];
+
+    const body = [
+      renderKeyValueCard({
+        x: 48,
+        y: 214,
+        width: 344,
+        height: 580,
+        title: 'Run Specs',
+        chipType: 'route',
+        chipColor: PANEL_GREEN,
+        rows: [
+          { label: 'Commodity', value: route.commodity },
+          { label: 'Cargo', value: `${formatNumber(route.effectiveCargo)} SCU` },
+          { label: 'Buy', value: `${formatNumber(Math.round(route.buyPricePerScu))} / SCU` },
+          { label: 'Sell', value: `${formatNumber(Math.round(route.sellPricePerScu))} / SCU` },
+          { label: 'Expected / min', value: `${formatNumber(Math.round(route.profitPerMinute || 0))} aUEC` },
+          { label: 'Travel Time', value: route.time.label },
+        ],
+      }),
+      renderKeyValueCard({
+        x: 408,
+        y: 214,
+        width: 344,
+        height: 580,
+        title: 'Market Quality',
+        chipType: 'cargo',
+        chipColor: PANEL_GOLD,
+        rows: [
+          { label: 'Freshness', value: route.freshnessInfo?.text || 'Unknown' },
+          { label: 'Liquidity', value: route.liquidityInfo?.text || 'Unknown' },
+          { label: 'Risk', value: `${route.riskScore}/100 ${route.riskLabel || ''}`.trim() },
+          { label: 'UEX Route', value: route.routeQuality?.text || 'No route hints' },
+          { label: 'Buy Stock', value: route.buyStock ? `${formatNumber(Math.round(route.buyStock))} SCU` : 'Unknown' },
+          { label: 'Sell Demand', value: route.sellDemand ? `${formatNumber(Math.round(route.sellDemand))} SCU` : 'Unknown' },
+        ],
+      }),
+      renderListRowsCard({
+        x: 768,
+        y: 214,
+        width: 384,
+        height: 580,
+        title: 'Run Notes',
+        subtitle: 'Why this route ranks first',
+        chipType: 'leaderboard',
+        chipColor: PANEL_CYAN,
+        rows: [
+          {
+            primary: 'Confidence',
+            secondary: rationale[0] || 'Confidence is based on freshness, liquidity, and route quality.',
+            value: route.confidenceLabel,
+          },
+          {
+            primary: 'Commodity Signal',
+            secondary: rationale[1] || (route.marketInfo?.text || 'No commodity ranking details'),
+            value: route.marketInfo?.illegal ? 'Illegal' : 'Legal',
+          },
+          {
+            primary: 'Price History',
+            secondary: rationale[2] || 'Recent price history is unavailable for this route.',
+            value: `${historyBundle?.buyHistory?.count || 0}+${historyBundle?.sellHistory?.count || 0}`,
+          },
+          {
+            primary: 'Risk Factors',
+            secondary: route.riskReasons || 'No major risk factors recorded.',
+            value: route.riskLabel || 'Low',
+          },
+        ],
+        rowHeight: 92,
+      }),
+    ].join('');
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, `${header.join('')}${body}`);
+  }
+
+  buildBracketRoutesPanelSvg({ ship, location, finish, sourceLabel, brackets }) {
+    const rows = brackets.map(bracket => bracket.route
+      ? {
+          primary: `${bracket.name} • ${bracket.route.commodity}`,
+          secondary: `${bracket.route.buyShortGroup} -> ${bracket.route.sellShortGroup}`,
+          value: `${formatNumber(Math.round(bracket.route.totalProfit))} aUEC`,
+          tertiary: `ROI ${bracket.route.profitPercent.toFixed(1)}% • ${Math.round((bracket.route.confidenceScore || 0) * 100)}% conf`,
+        }
+      : {
+          primary: `${bracket.name} • No route found`,
+          secondary: 'No matching commodity run for the current filters',
+          value: 'None',
+        });
+
+    const header = [
+      svgText(`Bracket Routes - ${ship.name}`, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText('Best route per cargo bracket', 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
+      }),
+      renderMetricPill(48, 118, 250, 'Start', location || 'Any', PANEL_BLUE),
+      renderMetricPill(314, 118, 250, 'Finish', finish || 'Any', PANEL_PINK),
+      renderMetricPill(580, 118, 250, 'Ship Cargo', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
+      renderMetricPill(846, 118, 306, 'Data Source', sourceLabel, PANEL_GOLD),
+      renderListRowsCard({
+        x: 48,
+        y: 214,
+        width: 1104,
+        height: 580,
+        title: 'Recommended Runs',
+        subtitle: 'Ranked with live pricing, route confidence, and liquidity weighting',
+        chipType: 'route',
+        chipColor: PANEL_GREEN,
+        rows,
+        rowHeight: 64,
+      }),
+    ];
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, header.join(''));
+  }
+
+  buildLocationPanelSvg(group) {
+    const shopRows = group.terminals.slice(0, 7).map(terminal => ({
+      primary: terminal.name,
+      secondary: `${terminal.sells.length} sells • ${terminal.buys.length} buys`,
+    }));
+    const sellRows = group.sells.slice(0, 7).map(item => ({
+      primary: item.commodity,
+      secondary: item.terminalName,
+      value: `${formatNumber(Math.round(item.price))} / SCU`,
+    }));
+    const buyRows = group.buys.slice(0, 7).map(item => ({
+      primary: item.commodity,
+      secondary: item.terminalName,
+      value: `${formatNumber(Math.round(item.price))} / SCU`,
+    }));
+
+    const header = [
+      svgText(group.shortName, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText(`${group.system} • ${group.locationType}`, 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
+      }),
+      renderMetricPill(48, 118, 250, 'Commodity Shops', formatNumber(group.terminals.length), PANEL_BLUE),
+      renderMetricPill(314, 118, 250, 'Sells', formatNumber(group.sells.length), PANEL_GREEN),
+      renderMetricPill(580, 118, 250, 'Buys', formatNumber(group.buys.length), PANEL_PINK),
+      renderMetricPill(846, 118, 306, 'Atmosphere', group.atmospheric ? 'Yes' : 'No', PANEL_CYAN),
+      renderListRowsCard({
+        x: 48,
+        y: 214,
+        width: 336,
+        height: 580,
+        title: 'Shops',
+        subtitle: 'Commodity terminals in this area',
+        chipType: 'location',
+        chipColor: PANEL_BLUE,
+        rows: shopRows.length ? shopRows : [{ primary: 'No terminals found', secondary: 'No tracked commodity terminals here' }],
+        rowHeight: 54,
+      }),
+      renderListRowsCard({
+        x: 400,
+        y: 214,
+        width: 352,
+        height: 580,
+        title: 'Best Sells',
+        subtitle: 'Cheapest local sell offers',
+        chipType: 'cargo',
+        chipColor: PANEL_GREEN,
+        rows: sellRows.length ? sellRows : [{ primary: 'Nothing currently listed', secondary: 'No sell offers are tracked here' }],
+        rowHeight: 54,
+      }),
+      renderListRowsCard({
+        x: 768,
+        y: 214,
+        width: 384,
+        height: 580,
+        title: 'Best Buys',
+        subtitle: 'Strongest local buy offers',
+        chipType: 'leaderboard',
+        chipColor: PANEL_PINK,
+        rows: buyRows.length ? buyRows : [{ primary: 'Nothing currently listed', secondary: 'No buy offers are tracked here' }],
+        rowHeight: 54,
+      }),
+    ];
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, header.join(''));
+  }
+
+  buildBuyersPanelSvg({ commodity, amount, location, buyers }) {
+    const rows = buyers.map((buyer, index) => ({
+      primary: `${index + 1}. ${buyer.shortGroupName}`,
+      secondary: buyer.terminalName,
+      value: `${formatNumber(Math.round(buyer.price))} / SCU`,
+      tertiary: amount
+        ? `Sellable ${formatNumber(Math.round(buyer.sellableAmount ?? amount))} • ${formatNumber(Math.round(buyer.totalValue || 0))} aUEC`
+        : `Demand ${buyer.demand ? formatNumber(Math.round(buyer.demand)) : 'Unknown'} SCU`,
+    }));
+
+    const header = [
+      svgText(`Best Buyers - ${commodity}`, 48, 52, { size: 40, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText('Highest paying buyer destinations', 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
+      }),
+      renderMetricPill(48, 118, 250, 'Commodity', commodity, PANEL_GREEN),
+      renderMetricPill(314, 118, 250, 'Amount', amount ? `${formatNumber(amount)} SCU` : 'Not set', PANEL_BLUE),
+      renderMetricPill(580, 118, 250, 'Location Filter', location || 'None', PANEL_PINK),
+      renderMetricPill(846, 118, 306, 'Results', formatNumber(buyers.length), PANEL_GOLD),
+      renderListRowsCard({
+        x: 48,
+        y: 214,
+        width: 1104,
+        height: 580,
+        title: 'Buyer Board',
+        subtitle: amount ? 'Ranked by total sale value for the requested cargo' : 'Ranked by price per SCU',
+        chipType: 'leaderboard',
+        chipColor: PANEL_GOLD,
+        rows,
+        rowHeight: 64,
+      }),
+    ];
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, header.join(''));
+  }
+
+  buildShipPanelSvg(ship, sourceLabel) {
+    const header = [
+      svgText(ship.name, 48, 52, { size: 42, weight: 800, family: FONT_DISPLAY, letterSpacing: 0.2 }),
+      svgText('Cargo hauling profile', 48, 92, {
+        size: 18,
+        weight: 700,
+        fill: PANEL_MUTED,
+        family: FONT_DISPLAY,
+        style: 'italic',
+      }),
+      renderMetricPill(48, 118, 250, 'Cargo Capacity', `${formatNumber(ship.cargo)} SCU`, PANEL_GREEN),
+      renderMetricPill(314, 118, 250, 'Military?', ship.military ? 'Yes' : 'No', PANEL_GOLD),
+      renderMetricPill(580, 118, 250, 'Cargo Tier', ship.cargoTier, PANEL_CYAN),
+      renderMetricPill(846, 118, 306, 'Data Source', sourceLabel, PANEL_BLUE),
+      renderKeyValueCard({
+        x: 48,
+        y: 214,
+        width: 520,
+        height: 580,
+        title: 'Profile',
+        chipType: 'ship',
+        chipColor: PANEL_BLUE,
+        rows: [
+          { label: 'Ship', value: ship.name },
+          { label: 'Cargo Capacity', value: `${formatNumber(ship.cargo)} SCU` },
+          { label: 'Military?', value: ship.military ? 'Yes' : 'No' },
+          { label: 'Cargo Tier', value: ship.cargoTier },
+          { label: 'Source', value: sourceLabel },
+        ],
+      }),
+      renderListRowsCard({
+        x: 592,
+        y: 214,
+        width: 560,
+        height: 580,
+        title: 'Hauling Notes',
+        subtitle: 'Quick take for route planning',
+        chipType: 'cargo',
+        chipColor: PANEL_GREEN,
+        rows: [
+          {
+            primary: 'Cargo Footprint',
+            secondary: ship.cargo >= 500 ? 'Well-suited for large high-yield trade runs.' : ship.cargo >= 100 ? 'Fits medium bracket trade runs comfortably.' : 'Best for compact cargo loops and targeted runs.',
+            value: ship.cargoTier,
+          },
+          {
+            primary: 'Hull Risk',
+            secondary: ship.military ? 'Military-derived hulls usually survive hot routes better.' : 'Standard cargo hulls benefit more from safer monitored routes.',
+            value: ship.military ? 'Reduced' : 'Standard',
+          },
+          {
+            primary: 'Use Case',
+            secondary: ship.cargo >= 250 ? 'Aim for strong profit-per-minute routes with healthy stock and demand.' : 'Aim for reliable local routes with fresh data and short approach times.',
+          },
+        ],
+        rowHeight: 96,
+      }),
+    ];
+
+    return this.buildPanelSvg(PANEL_WIDTH, PANEL_HEIGHT, header.join(''));
+  }
+
+  buildTradeRouteEmbed(route, controls = [], historyBundle = null, rationale = []) {
+    return this.buildImagePanelResponse({
+      title: `Best Route - ${route.shipProfile.name}`,
+      footer: 'SPACEWHLE Trade Command - live UEX pricing, route hints, and commodity ranking data',
+      svg: this.buildTradeRoutePanelSvg(route, historyBundle, rationale),
+      attachmentName: `route-${route.shipProfile.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${route.commodity.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
+      components: controls,
+    });
+  }
+
+  buildBracketRoutesEmbed(payload) {
+    return this.buildImagePanelResponse({
+      title: `Bracket Routes - ${payload.ship.name}`,
+      footer: 'SPACEWHLE Trade Command - ranked by profit, confidence, liquidity, and route quality',
+      svg: this.buildBracketRoutesPanelSvg(payload),
+      attachmentName: `best-routes-${payload.ship.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
+      components: [],
+    });
+  }
+
+  buildLocationLookupEmbed(group) {
+    return this.buildImagePanelResponse({
+      title: group.shortName,
+      footer: 'SPACEWHLE Trade Command - grouped commodity location view',
+      svg: this.buildLocationPanelSvg(group),
+      attachmentName: `location-${group.shortName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
+      components: [],
+    });
+  }
+
+  buildBuyersLookupEmbed(payload) {
+    return this.buildImagePanelResponse({
+      title: `Best Buyers - ${payload.commodity}`,
+      footer: 'SPACEWHLE Trade Command - top buyer board',
+      svg: this.buildBuyersPanelSvg(payload),
+      attachmentName: `buyers-${payload.commodity.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
+      components: [],
+    });
+  }
+
+  buildShipLookupEmbed(ship, sourceLabel) {
+    return this.buildImagePanelResponse({
+      title: ship.name,
+      footer: 'Live pull attempted first, then fallback ship data.',
+      svg: this.buildShipPanelSvg(ship, sourceLabel),
+      attachmentName: `ship-${ship.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
+      components: [],
+    });
   }
 
   buildTopEmbed(days = 7, category = 'overview', showTime = false, graphMenuEnabled = false) {
@@ -2265,44 +2885,17 @@ class StatsTracker {
     const labels = dayKeys.map(formatDisplayDate);
     const playerSeries = dayKeys.map(dayKey => Number(this.state.peaks?.[dayKey]?.count || 0));
 
-    const currentPlayers = current.players.length
-      ? current.players.slice(0, 12).map((player, index) => `\`${index + 1}. ${player.name}\``).join('\n')
-      : 'No one currently detected in Star Citizen.';
-
-    const embed = this.buildBaseEmbed(`Players - Last ${days} Day${days === 1 ? '' : 's'}`).addFields(
-        {
-          name: 'Overview',
-          value: this.formatBubbleSummary([
-            { label: 'Live Now', value: formatNumber(current.count) },
-            { label: 'Peak', value: formatNumber(peak.count || 0) },
-            { label: 'Peak Time', value: peak.ts ? new Date(peak.ts).toLocaleString('en-GB') : 'No data' },
-          ]),
-          inline: false,
-        },
-        {
-          name: 'Online Now',
-          value: currentPlayers,
-          inline: false,
-        },
-      );
-
-    if (activeCategory === 'players' && labels.length) {
-      const metric = this.getMetricConfig('players');
-      embed.setImage(this.buildTrendChartUrl({
-        labels,
-        values: playerSeries,
-        label: metric.label,
-        color: metric.color,
-        fillColor: metric.fillColor,
-        axisTitle: metric.axisTitle,
-      }));
-    }
-
     const components = [this.buildStatsControlRow('players', guild?.id || 'global', days, activeCategory, showTime, graphMenuEnabled)];
     if (showTime) components.push(this.buildRangeButtons('players', guild?.id || 'global', days, activeCategory, true, graphMenuEnabled));
     components.push(this.buildCategorySelectRow('players', guild?.id || 'global', days, activeCategory, showTime, graphMenuEnabled));
 
-    return { embeds: [embed], components };
+    return this.buildImagePanelResponse({
+      title: `Players - Last ${days} Day${days === 1 ? '' : 's'}`,
+      footer: `Server Lookback: Last ${days} Day${days === 1 ? '' : 's'} - Timezone: UTC`,
+      svg: this.buildPlayersPanelSvg(guild, days, activeCategory, current, peak, labels, playerSeries),
+      attachmentName: `players-${days}-${activeCategory}.png`,
+      components,
+    });
   }
 
   async buildPanel(panel, targetId, days, category = 'overview', showTime = false, graphMenuEnabled = false, guild = null) {
