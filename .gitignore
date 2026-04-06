@@ -1,0 +1,8 @@
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+node_modules/
+stats-state.json
+route-state.json
+monitor-state.json
