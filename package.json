@@ -3,10 +3,10 @@
   "version": "1.4.17",
   "main": "index.js",
   "scripts": {
-    "postinstall": "node scripts/verify-resvg.js",
-    "prestart": "node scripts/verify-resvg.js",
+    "postinstall": "node -e \"const { assertStatsImageRenderer } = require('./tracker'); console.log('SVG renderer ready (' + assertStatsImageRenderer() + ' byte test PNG).');\"",
+    "prestart": "node -e \"const { assertStatsImageRenderer } = require('./tracker'); console.log('SVG renderer ready (' + assertStatsImageRenderer() + ' byte test PNG).');\"",
     "start": "node index.js",
-    "verify:resvg": "node scripts/verify-resvg.js",
+    "verify:resvg": "node -e \"const { assertStatsImageRenderer } = require('./tracker'); console.log('SVG renderer ready (' + assertStatsImageRenderer() + ' byte test PNG).');\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

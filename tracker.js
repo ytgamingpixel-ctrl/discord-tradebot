@@ -1,6 +1,7 @@
 require('dotenv').config({ quiet: true });
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const {
   ActionRowBuilder,
   AttachmentBuilder,
@@ -9,13 +10,126 @@ const {
   EmbedBuilder,
   StringSelectMenuBuilder,
 } = require('discord.js');
-const {
-  ensureResvgDependenciesInstalled,
-  getDeclaredResvgVersion,
-  getExpectedResvgNativePackage,
-} = require('./resvg-support');
 
 let CachedResvg = null;
+
+function getDeclaredResvgVersion() {
+  try {
+    const manifest = require('./package.json');
+    const spec = String(manifest?.dependencies?.['@resvg/resvg-js'] || '').trim();
+    const match = spec.match(/\d+\.\d+\.\d+/);
+    return match ? match[0] : '2.6.2';
+  } catch {
+    return '2.6.2';
+  }
+}
+
+function isMuslRuntime() {
+  if (process.platform !== 'linux') return false;
+
+  try {
+    return !process.report?.getReport?.().header?.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
+function getExpectedResvgNativePackage() {
+  if (process.platform === 'win32') {
+    if (process.arch === 'x64') return '@resvg/resvg-js-win32-x64-msvc';
+    if (process.arch === 'ia32') return '@resvg/resvg-js-win32-ia32-msvc';
+    if (process.arch === 'arm64') return '@resvg/resvg-js-win32-arm64-msvc';
+    return null;
+  }
+
+  if (process.platform === 'linux') {
+    if (process.arch === 'x64') {
+      return isMuslRuntime() ? '@resvg/resvg-js-linux-x64-musl' : '@resvg/resvg-js-linux-x64-gnu';
+    }
+
+    if (process.arch === 'arm64') {
+      return isMuslRuntime() ? '@resvg/resvg-js-linux-arm64-musl' : '@resvg/resvg-js-linux-arm64-gnu';
+    }
+
+    if (process.arch === 'arm') return '@resvg/resvg-js-linux-arm-gnueabihf';
+    return null;
+  }
+
+  if (process.platform === 'darwin') {
+    if (process.arch === 'x64') return '@resvg/resvg-js-darwin-x64';
+    if (process.arch === 'arm64') return '@resvg/resvg-js-darwin-arm64';
+    return null;
+  }
+
+  if (process.platform === 'android') {
+    if (process.arch === 'arm64') return '@resvg/resvg-js-android-arm64';
+    if (process.arch === 'arm') return '@resvg/resvg-js-android-arm-eabi';
+  }
+
+  return null;
+}
+
+function canResolvePackage(packageName, baseDir) {
+  try {
+    require.resolve(`${packageName}/package.json`, {
+      paths: [baseDir],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureResvgDependenciesInstalled(baseDir = __dirname) {
+  const projectDir = path.resolve(baseDir);
+  const version = getDeclaredResvgVersion();
+  const nativePackage = getExpectedResvgNativePackage();
+  const missingPackages = [];
+
+  if (!canResolvePackage('@resvg/resvg-js', projectDir)) {
+    missingPackages.push(`@resvg/resvg-js@${version}`);
+  }
+
+  if (nativePackage && !canResolvePackage(nativePackage, projectDir)) {
+    missingPackages.push(`${nativePackage}@${version}`);
+  }
+
+  if (!missingPackages.length) {
+    return {
+      installed: false,
+      projectDir,
+      packages: [],
+      nativePackage,
+      version,
+    };
+  }
+
+  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const args = ['install', '--no-save', '--no-package-lock', ...missingPackages];
+  const result = spawnSync(npmCommand, args, {
+    cwd: projectDir,
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+
+  if (result.error || result.status !== 0) {
+    const error = result.error || new Error(`npm exited with status ${result.status || 1}.`);
+    error.command = `${npmCommand} ${args.join(' ')}`;
+    error.stdout = result.stdout || '';
+    error.stderr = result.stderr || '';
+    throw error;
+  }
+
+  return {
+    installed: true,
+    projectDir,
+    packages: missingPackages,
+    nativePackage,
+    version,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
+}
 
 function getResvgConstructor() {
   if (CachedResvg) return CachedResvg;
