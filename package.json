@@ -3,6 +3,10 @@
   "version": "1.4.17",
   "main": "index.js",
   "scripts": {
+    "postinstall": "node scripts/verify-resvg.js",
+    "prestart": "node scripts/verify-resvg.js",
+    "start": "node index.js",
+    "verify:resvg": "node scripts/verify-resvg.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

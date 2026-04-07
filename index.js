@@ -95,6 +95,27 @@ function isUnknownInteractionError(error) {
   return Number(error?.code) === 10062 || /Unknown interaction/i.test(String(error?.message || ''));
 }
 
+const PUBLIC_CHAT_COMMANDS = new Set([
+  'citizen',
+  'me',
+  'route',
+  'best-routes',
+  'location',
+  'buyers',
+  'players',
+  'top',
+  'stats',
+  'server',
+  'ship',
+]);
+
+async function deferChatInputCommand(interaction) {
+  if (interaction.deferred || interaction.replied) return;
+  await interaction.deferReply({
+    ephemeral: interaction.commandName === 'promote' || !PUBLIC_CHAT_COMMANDS.has(interaction.commandName),
+  });
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -827,7 +848,7 @@ function buildMemberProfileEmbed(profile, discordUser) {
 }
 
 async function handleMeCommand(interaction) {
-  await interaction.deferReply();
+  await deferChatInputCommand(interaction);
 
   try {
     const payload = await fetchWebsiteJson(API_MEMBER_PROFILE_PATH, {
@@ -1082,7 +1103,7 @@ function buildCitizenEmbed(profile) {
 }
 
 async function handleCitizenCommand(interaction) {
-  await interaction.deferReply();
+  await deferChatInputCommand(interaction);
 
   const usernameInput = interaction.options.getString('username', false)?.trim();
   const linkedUser = interaction.options.getUser('user', false);
@@ -1240,7 +1261,7 @@ function buildPromotionAnnouncement(targetMember, rankRole, addedRoles, customMe
 }
 
 async function handlePromoteCommand(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await deferChatInputCommand(interaction);
 
   if (!interaction.guild) {
     await interaction.editReply('Promotions can only be run inside a server.');
@@ -2859,6 +2880,8 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    await deferChatInputCommand(interaction);
+
     if (interaction.commandName === 'promote') {
       await handlePromoteCommand(interaction);
       return;
@@ -2875,7 +2898,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'route') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
 
       const response = await buildRouteResponse({
         shipName: interaction.options.getString('ship', true),
@@ -2891,7 +2914,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'best-routes') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await loadMarketData(false);
 
       const locationInput = interaction.options.getString('location');
@@ -2982,7 +3005,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'location') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await loadMarketData(false);
 
       const locationInput = interaction.options.getString('location', true);
@@ -3028,7 +3051,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'buyers') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await loadMarketData(false);
 
       const commodityInput = interaction.options.getString('commodity', true);
@@ -3094,19 +3117,19 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'players') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
       return;
     }
 
     if (interaction.commandName === 'top') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await interaction.editReply(await tracker.buildTopEmbed(7));
       return;
     }
 
     if (interaction.commandName === 'stats') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       const subcommand = interaction.options.getSubcommand(false);
       const user = interaction.options.getUser('user', false);
 
@@ -3130,13 +3153,13 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'server') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await interaction.editReply(await tracker.buildServerStatsEmbed(7));
       return;
     }
 
     if (interaction.commandName === 'ship') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await ensureShipData(false);
       const shipName = interaction.options.getString('ship', true);
       const ship = getShipProfile(shipName);
@@ -3165,7 +3188,13 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    if (!interaction.deferred && !interaction.replied) {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({
+        content: `I do not have a handler for \`/${interaction.commandName}\` in this build.`,
+        embeds: [],
+        components: [],
+      });
+    } else {
       await interaction.reply({
         content: `I do not have a handler for \`/${interaction.commandName}\` in this build.`,
         ephemeral: true,

@@ -30,6 +30,8 @@ function getResvgConstructor() {
       `Bot directory: ${__dirname}`,
       `Process cwd: ${process.cwd()}`,
       `Node version: ${process.version}`,
+      `Platform: ${process.platform}/${process.arch}`,
+      `Module search paths: ${module.paths.join(', ')}`,
       `Original error: ${error.message}`,
     ].join(' ');
     const wrappedError = new Error(message);
