@@ -2490,7 +2490,9 @@ async function handleAutocomplete(interaction) {
   const focused = interaction.options.getFocused(true);
 
   if (focused.name === 'ship') {
-    await ensureShipData(false);
+    void ensureShipData(false).catch(error => {
+      console.error('Background ship data warm failed:', error);
+    });
     await interaction.respond(pickAutocompleteChoices(getShipChoices(), focused.value));
     return;
   }
@@ -3161,6 +3163,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await interaction.editReply({ embeds: [embed] });
       return;
+    }
+
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.reply({
+        content: `I do not have a handler for \`/${interaction.commandName}\` in this build.`,
+        ephemeral: true,
+      });
     }
   } catch (error) {
     console.error('Interaction error:', error);
