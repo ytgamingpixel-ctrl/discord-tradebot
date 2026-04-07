@@ -2319,7 +2319,7 @@ class StatsTracker {
                 new EmbedBuilder()
                   .setColor(0x2b2d31)
                   .setTitle(title || 'Stats')
-                  .setDescription('Rendered stats cards are unavailable right now.'),
+                  .setDescription('Rendered card unavailable right now.'),
               ],
               components,
               attachments: [],
@@ -2347,12 +2347,192 @@ class StatsTracker {
       const fallback = new EmbedBuilder()
         .setColor(0x2b2d31)
         .setTitle(title || 'Stats')
-        .setDescription('The stats card could not be rendered right now.');
+        .setDescription('The card could not be rendered right now.');
 
       const payload = { embeds: [fallback], components, attachments: [] };
       if (typeof content === 'string') payload.content = content;
       return payload;
     }
+  }
+
+  buildTopFallbackPayload(days, board, components = []) {
+    const totals = board.all.reduce((acc, row) => ({
+      messages: acc.messages + Number(row.messages || 0),
+      voiceSeconds: acc.voiceSeconds + Number(row.voiceSeconds || 0),
+      starCitizenSeconds: acc.starCitizenSeconds + Number(row.starCitizenSeconds || 0),
+    }), { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 });
+
+    const embed = this.buildBaseEmbed(`Top Activity - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription('Showing the text version.')
+      .addFields(
+        {
+          name: 'Overview',
+          value: `\`\`\`\nMembers   | ${formatNumber(board.trackedUsers.length)}\nMessages  | ${formatNumber(totals.messages)}\nVC Hours  | ${formatHoursShort(totals.voiceSeconds)}\nSC Hours  | ${formatHoursShort(totals.starCitizenSeconds)}\n\`\`\``,
+          inline: false,
+        },
+        { name: 'Top Messages', value: this.formatTopThree(board.messages, 'messages'), inline: true },
+        { name: 'Top VC Hours', value: this.formatTopThree(board.voice, 'voice'), inline: true },
+        { name: 'Top SC Hours', value: this.formatTopThree(board.starCitizen, 'starCitizen'), inline: true },
+      );
+
+    return { embeds: [embed], components, attachments: [] };
+  }
+
+  buildUserFallbackPayload(userId, days, stats, rankings, components = [], content = null) {
+    if (!stats) {
+      return {
+        content: content || 'No tracked data for that user yet.',
+        embeds: [],
+        components,
+        attachments: [],
+      };
+    }
+
+    const embed = this.buildBaseEmbed(`${stats.username} - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription('Showing the text version.')
+      .addFields(
+        {
+          name: 'Summary',
+          value: `\`\`\`\nMessages  | ${formatNumber(stats.totals.messages)}\nVC Hours  | ${formatHoursShort(stats.totals.voiceSeconds)}\nSC Hours  | ${formatHoursShort(stats.totals.starCitizenSeconds)}\nVC Live   | ${formatSessionLength(stats.current.voiceStartedAt)}\nSC Live   | ${formatSessionLength(stats.current.starCitizenStartedAt)}\n\`\`\``,
+          inline: false,
+        },
+        {
+          name: 'Leaderboard',
+          value: `\`\`\`\nMessages  | #${rankings.messages || '-'}\nVC Hours  | #${rankings.voice || '-'}\nSC Hours  | #${rankings.starCitizen || '-'}\nTracked   | ${formatNumber(rankings.totalTracked)}\n\`\`\``,
+          inline: true,
+        },
+        { name: 'Top Messages', value: this.formatTopThree(rankings.board.messages, 'messages'), inline: true },
+        { name: 'Top VC Hours', value: this.formatTopThree(rankings.board.voice, 'voice'), inline: true },
+        { name: 'Top SC Hours', value: this.formatTopThree(rankings.board.starCitizen, 'starCitizen'), inline: true },
+      );
+
+    const payload = { embeds: [embed], components, attachments: [] };
+    if (typeof content === 'string') payload.content = content;
+    return payload;
+  }
+
+  buildServerFallbackPayload(days, stats, components = []) {
+    const embed = this.buildBaseEmbed(`Server Activity - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription('Showing the text version.')
+      .addFields({
+        name: 'Overview',
+        value: `\`\`\`\nMessages  | ${formatNumber(stats.totals.messages)}\nVC Hours  | ${formatHoursShort(stats.totals.voiceSeconds)}\nSC Hours  | ${formatHoursShort(stats.totals.starCitizenSeconds)}\n\`\`\``,
+        inline: false,
+      });
+
+    return { embeds: [embed], components, attachments: [] };
+  }
+
+  buildPlayersFallbackPayload(days, current, peak, components = []) {
+    const currentLines = current.players.length
+      ? current.players.slice(0, 12).map(player => `${player.name} | ${formatSessionLength(player.startedAt)}`).join('\n')
+      : 'No one currently detected in Star Citizen.';
+
+    const embed = this.buildBaseEmbed(`Players - Last ${days} Day${days === 1 ? '' : 's'}`)
+      .setDescription('Showing the text version.')
+      .addFields(
+        {
+          name: 'Overview',
+          value: `\`\`\`\nLive Now   | ${formatNumber(current.count)}\nPeak       | ${formatNumber(peak.count || 0)}\nPeak Time  | ${peak.ts ? new Date(peak.ts).toLocaleString('en-GB') : 'No data'}\n\`\`\``,
+          inline: false,
+        },
+        {
+          name: 'Current Players',
+          value: `\`\`\`\n${clampFieldText(currentLines, 'No one currently detected in Star Citizen.')}\n\`\`\``,
+          inline: false,
+        },
+      );
+
+    return { embeds: [embed], components, attachments: [] };
+  }
+
+  buildTradeRouteFallbackPayload(route, controls = []) {
+    const embed = this.buildBaseEmbed(`Best Route - ${route.shipProfile.name}`)
+      .setDescription(`${route.buyShortGroup} -> ${route.sellShortGroup}\nShowing the text version.`)
+      .addFields(
+        { name: 'Commodity', value: route.commodity || 'Unknown', inline: true },
+        { name: 'Start', value: route.buyShortGroup || 'Unknown', inline: true },
+        { name: 'Finish', value: route.sellShortGroup || 'Unknown', inline: true },
+        { name: 'Cargo Needed', value: `${formatNumber(route.effectiveCargo)} SCU`, inline: true },
+        { name: 'Ship Cargo', value: `${formatNumber(route.shipProfile.cargo)} SCU`, inline: true },
+        { name: 'Investment', value: `${formatNumber(Math.round(route.cargoValue || 0))} aUEC`, inline: true },
+        { name: 'Gross Profit', value: `${formatNumber(Math.round(route.totalProfit || 0))} aUEC`, inline: true },
+        { name: 'ROI', value: `${Number(route.profitPercent || 0).toFixed(1)}%`, inline: true },
+        { name: 'Risk', value: `${route.riskScore || 0}/100`, inline: true },
+        { name: 'Buy Stock', value: route.buyStock ? `${formatNumber(Math.round(route.buyStock))} SCU` : 'Unknown', inline: true },
+        { name: 'Sell Demand', value: route.sellDemand ? `${formatNumber(Math.round(route.sellDemand))} SCU` : 'Unknown', inline: true },
+        { name: 'Time', value: route.time?.label || 'Unknown', inline: true },
+      );
+
+    if (route.riskReasons) {
+      embed.addFields({ name: 'Risk Notes', value: clampFieldText(route.riskReasons), inline: false });
+    }
+
+    return { embeds: [embed], components: controls, attachments: [] };
+  }
+
+  buildBracketRoutesFallbackPayload({ location, finish, brackets }) {
+    const rows = brackets.map(bracket => bracket.route
+      ? `${bracket.name}: ${bracket.route.commodity} | ${bracket.route.buyShortGroup} -> ${bracket.route.sellShortGroup} | ${formatNumber(Math.round(bracket.route.totalProfit || 0))} aUEC`
+      : `${bracket.name}: no route found`);
+
+    const embed = this.buildBaseEmbed(`Bracket Routes - ${location || 'All Starts'}`)
+      .setDescription('Showing the text version.')
+      .addFields(
+        { name: 'Start', value: location || 'Any', inline: true },
+        { name: 'Finish', value: finish || 'Any', inline: true },
+        { name: 'Recommended Runs', value: clampFieldText(rows.join('\n')), inline: false },
+      );
+
+    return { embeds: [embed], components: [], attachments: [] };
+  }
+
+  buildLocationFallbackPayload(group) {
+    const shopRows = group.terminals.slice(0, 12).map(terminal => `${terminal.name} | ${terminal.sells.length} sells | ${terminal.buys.length} buys`);
+    const sellRows = group.sells.slice(0, 10).map(item => `${item.commodity} | ${item.terminalName} | ${formatNumber(Math.round(item.price))} / SCU`);
+    const buyRows = group.buys.slice(0, 10).map(item => `${item.commodity} | ${item.terminalName} | ${formatNumber(Math.round(item.price))} / SCU`);
+
+    const embed = this.buildBaseEmbed(group.shortName)
+      .setDescription(`${group.system} | ${group.locationType}\nShowing the text version.`)
+      .addFields(
+        { name: 'Commodity Shops', value: clampFieldText(shopRows.join('\n')), inline: false },
+        { name: 'Best Sells', value: clampFieldText(sellRows.join('\n'), 'Nothing currently listed for sale.'), inline: false },
+        { name: 'Best Buys', value: clampFieldText(buyRows.join('\n'), 'No commodity buy prices currently listed.'), inline: false },
+      );
+
+    return { embeds: [embed], components: [], attachments: [] };
+  }
+
+  buildBuyersFallbackPayload({ commodity, amount, location, buyers }) {
+    const rows = buyers.map((buyer, index) => {
+      const detail = amount
+        ? `Sellable ${formatNumber(Math.round(buyer.sellableAmount ?? amount))} | ${formatNumber(Math.round(buyer.totalValue || 0))} aUEC`
+        : `Demand ${buyer.demand ? formatNumber(Math.round(buyer.demand)) : 'Unknown'} SCU`;
+      return `${index + 1}. ${buyer.shortGroupName} | ${buyer.terminalName} | ${formatNumber(Math.round(buyer.price))} / SCU | ${detail}`;
+    });
+
+    const embed = this.buildBaseEmbed(`Best Buyers - ${commodity}`)
+      .setDescription('Showing the text version.')
+      .addFields(
+        { name: 'Amount', value: amount ? `${formatNumber(amount)} SCU` : 'Not set', inline: true },
+        { name: 'Location Filter', value: location || 'None', inline: true },
+        { name: 'Buyer Board', value: clampFieldText(rows.join('\n')), inline: false },
+      );
+
+    return { embeds: [embed], components: [], attachments: [] };
+  }
+
+  buildShipFallbackPayload(ship, sourceLabel) {
+    const embed = this.buildBaseEmbed(ship.name)
+      .setDescription('Showing the text version.')
+      .addFields(
+        { name: 'Cargo Capacity', value: `${formatNumber(ship.cargo)} SCU`, inline: true },
+        { name: 'Military?', value: ship.military ? 'Yes' : 'No', inline: true },
+        { name: 'Cargo Tier', value: ship.cargoTier || 'Unknown', inline: true },
+        { name: 'Ship Data Source', value: sourceLabel || 'Unknown', inline: false },
+      );
+
+    return { embeds: [embed], components: [], attachments: [] };
   }
 
   formatTopValue(row, category) {
@@ -3016,6 +3196,7 @@ class StatsTracker {
       svg: this.buildTradeRoutePanelSvg(route, historyBundle, rationale),
       attachmentName: `route-${route.shipProfile.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${route.commodity.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
       components: controls,
+      fallbackPayload: () => this.buildTradeRouteFallbackPayload(route, controls),
     });
   }
 
@@ -3027,6 +3208,7 @@ class StatsTracker {
       svg: this.buildBracketRoutesPanelSvg(payload),
       attachmentName: `best-routes-${locationSlug}.png`,
       components: [],
+      fallbackPayload: () => this.buildBracketRoutesFallbackPayload(payload),
     });
   }
 
@@ -3037,6 +3219,7 @@ class StatsTracker {
       svg: this.buildLocationPanelSvg(group),
       attachmentName: `location-${group.shortName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
       components: [],
+      fallbackPayload: () => this.buildLocationFallbackPayload(group),
     });
   }
 
@@ -3047,6 +3230,7 @@ class StatsTracker {
       svg: this.buildBuyersPanelSvg(payload),
       attachmentName: `buyers-${payload.commodity.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
       components: [],
+      fallbackPayload: () => this.buildBuyersFallbackPayload(payload),
     });
   }
 
@@ -3057,6 +3241,7 @@ class StatsTracker {
       svg: this.buildShipPanelSvg(ship, sourceLabel),
       attachmentName: `ship-${ship.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
       components: [],
+      fallbackPayload: () => this.buildShipFallbackPayload(ship, sourceLabel),
     });
   }
 
@@ -3073,6 +3258,7 @@ class StatsTracker {
       svg: this.buildTopPanelSvg(days, activeCategory, board),
       attachmentName: `top-${days}-${activeCategory}.png`,
       components,
+      fallbackPayload: () => this.buildTopFallbackPayload(days, board, components),
     });
   }
 
@@ -3101,6 +3287,14 @@ class StatsTracker {
       svg: await this.buildUserPanelSvg(userId, days, activeCategory, stats, rankings),
       attachmentName: `stats-user-${userId}-${days}-${activeCategory}.png`,
       components,
+      fallbackPayload: () => this.buildUserFallbackPayload(
+        userId,
+        days,
+        stats,
+        rankings,
+        components,
+        `<@${userId}> - Last ${days} Day${days === 1 ? '' : 's'}`,
+      ),
     });
   }
 
@@ -3116,6 +3310,7 @@ class StatsTracker {
       svg: this.buildServerPanelSvg(days, activeCategory, stats),
       attachmentName: `server-${days}-${activeCategory}.png`,
       components,
+      fallbackPayload: () => this.buildServerFallbackPayload(days, stats, components),
     });
   }
 
@@ -3137,6 +3332,7 @@ class StatsTracker {
       svg: this.buildPlayersPanelSvg(guild, days, activeCategory, current, peak, labels, playerSeries),
       attachmentName: `players-${days}-${activeCategory}.png`,
       components,
+      fallbackPayload: () => this.buildPlayersFallbackPayload(days, current, peak, components),
     });
   }
 

@@ -824,6 +824,21 @@ function buildMemberProfileEmbed(profile, discordUser) {
   return embed;
 }
 
+async function editReplyWithTrackedMemberFallback(interaction, reason) {
+  try {
+    const payload = await tracker.buildUserStatsEmbed(interaction.user.id, 7);
+    const existingContent = typeof payload.content === 'string' ? payload.content : '';
+    const content = [reason, existingContent].filter(Boolean).join('\n');
+    await interaction.editReply({
+      ...payload,
+      content: content || existingContent || undefined,
+    });
+  } catch (fallbackError) {
+    console.error('Tracked member fallback failed:', fallbackError);
+    await interaction.editReply(reason || 'I could not load your profile right now. Try again in a minute.');
+  }
+}
+
 async function handleMeCommand(interaction) {
   await interaction.deferReply();
 
@@ -835,29 +850,44 @@ async function handleMeCommand(interaction) {
     const profile = normalizeMemberProfile(payload, interaction.user);
 
     if (!profile) {
-      await interaction.editReply('I found a profile response, but it did not include usable member data yet.');
+      await editReplyWithTrackedMemberFallback(
+        interaction,
+        'Website profile data was incomplete, so I am showing your tracked Discord activity instead.',
+      );
       return;
     }
 
     await interaction.editReply({ embeds: [buildMemberProfileEmbed(profile, interaction.user)] });
   } catch (error) {
     if (error.code === 'API_NOT_CONFIGURED') {
-      await interaction.editReply('The member profile API is not configured yet. Set `API_BASE_URL` and, if needed, `API_MEMBER_PROFILE_PATH`.');
+      await editReplyWithTrackedMemberFallback(
+        interaction,
+        'Showing your tracked Discord activity profile.',
+      );
       return;
     }
 
     if (Number(error.status) === 404) {
-      await interaction.editReply('I could not find a linked organisation profile for you yet. Link your account on the website, then try again.');
+      await editReplyWithTrackedMemberFallback(
+        interaction,
+        'I could not find a linked website profile yet, so I am showing your tracked Discord activity instead.',
+      );
       return;
     }
 
     if (Number(error.status) === 401 || Number(error.status) === 403) {
-      await interaction.editReply('The profile API rejected the bot request. Check the API auth environment settings.');
+      await editReplyWithTrackedMemberFallback(
+        interaction,
+        'The website profile API rejected the bot request, so I am showing your tracked Discord activity instead.',
+      );
       return;
     }
 
     console.error('Member profile lookup failed:', error);
-    await interaction.editReply('I could not load your profile right now. Try again in a minute.');
+    await editReplyWithTrackedMemberFallback(
+      interaction,
+      'Website profile lookup failed, so I am showing your tracked Discord activity instead.',
+    );
   }
 }
 
