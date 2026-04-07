@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const { ChannelType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const commands = [

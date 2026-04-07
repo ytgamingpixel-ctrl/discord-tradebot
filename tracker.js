@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const fs = require('node:fs');
 const path = require('node:path');
 const {
@@ -9,6 +9,11 @@ const {
   EmbedBuilder,
   StringSelectMenuBuilder,
 } = require('discord.js');
+const {
+  ensureResvgDependenciesInstalled,
+  getDeclaredResvgVersion,
+  getExpectedResvgNativePackage,
+} = require('./resvg-support');
 
 let CachedResvg = null;
 
@@ -16,6 +21,11 @@ function getResvgConstructor() {
   if (CachedResvg) return CachedResvg;
 
   try {
+    const installResult = ensureResvgDependenciesInstalled(__dirname);
+    if (installResult.installed) {
+      console.log(`Installed missing SVG renderer packages: ${installResult.packages.join(', ')}`);
+    }
+
     const resvgPath = require.resolve('@resvg/resvg-js');
     ({ Resvg: CachedResvg } = require(resvgPath));
 
@@ -25,15 +35,21 @@ function getResvgConstructor() {
 
     return CachedResvg;
   } catch (error) {
+    const resvgVersion = getDeclaredResvgVersion();
+    const expectedNativePackage = getExpectedResvgNativePackage();
     const message = [
       'Stats image renderer failed to load @resvg/resvg-js.',
       `Bot directory: ${__dirname}`,
       `Process cwd: ${process.cwd()}`,
       `Node version: ${process.version}`,
       `Platform: ${process.platform}/${process.arch}`,
+      `Expected native package: ${expectedNativePackage || 'unknown'}`,
       `Module search paths: ${module.paths.join(', ')}`,
+      `Install command attempted: npm install --no-save --no-package-lock @resvg/resvg-js@${resvgVersion}${expectedNativePackage ? ` ${expectedNativePackage}@${resvgVersion}` : ''}`,
+      error.command ? `Installer command: ${error.command}` : null,
+      error.stderr ? `Installer stderr: ${error.stderr}` : null,
       `Original error: ${error.message}`,
-    ].join(' ');
+    ].filter(Boolean).join(' ');
     const wrappedError = new Error(message);
     wrappedError.cause = error;
     throw wrappedError;
