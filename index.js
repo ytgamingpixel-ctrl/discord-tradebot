@@ -15,7 +15,7 @@ const {
   PermissionFlagsBits,
 } = require('discord.js');
 
-const { StatsTracker } = require('./tracker');
+const { StatsTracker, assertStatsImageRenderer } = require('./tracker');
 const {
   ensureShipData,
   getShipChoices,
@@ -35,6 +35,8 @@ const client = new Client({
 
 const tracker = new StatsTracker(client);
 tracker.init();
+const statsRendererBytes = assertStatsImageRenderer();
+console.log(`Stats image renderer ready (${statsRendererBytes} byte self-test PNG).`);
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;

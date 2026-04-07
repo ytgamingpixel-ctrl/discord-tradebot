@@ -11,21 +11,43 @@ const {
 } = require('discord.js');
 
 let CachedResvg = null;
-let resvgLoadAttempted = false;
 
 function getResvgConstructor() {
   if (CachedResvg) return CachedResvg;
-  if (resvgLoadAttempted) return null;
-
-  resvgLoadAttempted = true;
 
   try {
-    ({ Resvg: CachedResvg } = require('@resvg/resvg-js'));
+    const resvgPath = require.resolve('@resvg/resvg-js');
+    ({ Resvg: CachedResvg } = require(resvgPath));
+
+    if (typeof CachedResvg !== 'function') {
+      throw new TypeError('@resvg/resvg-js did not export a Resvg constructor.');
+    }
+
     return CachedResvg;
   } catch (error) {
-    console.warn('Stats image renderer unavailable, falling back to standard embeds:', error.message);
-    return null;
+    const message = [
+      'Stats image renderer failed to load @resvg/resvg-js.',
+      `Bot directory: ${__dirname}`,
+      `Process cwd: ${process.cwd()}`,
+      `Node version: ${process.version}`,
+      `Original error: ${error.message}`,
+    ].join(' ');
+    const wrappedError = new Error(message);
+    wrappedError.cause = error;
+    throw wrappedError;
   }
+}
+
+function assertStatsImageRenderer() {
+  const ResvgConstructor = getResvgConstructor();
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10' fill='red'/></svg>";
+  const png = new ResvgConstructor(svg).render().asPng();
+
+  if (!png || !png.length) {
+    throw new Error('Stats image renderer self-test produced an empty PNG.');
+  }
+
+  return png.length;
 }
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
@@ -2295,7 +2317,6 @@ class StatsTracker {
 
   renderSvgAttachment(svg, name) {
     const ResvgConstructor = getResvgConstructor();
-    if (!ResvgConstructor) return null;
 
     const resvg = new ResvgConstructor(svg, {
       fitTo: { mode: 'width', value: PANEL_RENDER_WIDTH },
@@ -2308,51 +2329,24 @@ class StatsTracker {
     return new AttachmentBuilder(resvg.render().asPng(), { name });
   }
 
-  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer, fallbackPayload }) {
-    try {
-      const attachment = this.renderSvgAttachment(svg, attachmentName);
-      if (!attachment) {
-        return typeof fallbackPayload === 'function'
-          ? fallbackPayload()
-          : {
-              embeds: [
-                new EmbedBuilder()
-                  .setColor(0x2b2d31)
-                  .setTitle(title || 'Stats')
-                  .setDescription('Rendered stats cards are unavailable right now.'),
-              ],
-              components,
-              attachments: [],
-              ...(typeof content === 'string' ? { content } : {}),
-            };
-      }
+  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer }) {
+    void title;
+    void footer;
 
-      const embed = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setImage(`attachment://${attachmentName}`);
+    const attachment = this.renderSvgAttachment(svg, attachmentName);
+    const embed = new EmbedBuilder()
+      .setColor(0x2b2d31)
+      .setImage(`attachment://${attachmentName}`);
 
-      const payload = {
-        embeds: [embed],
-        components,
-        files: [attachment],
-        attachments: [],
-      };
+    const payload = {
+      embeds: [embed],
+      components,
+      files: [attachment],
+      attachments: [],
+    };
 
-      if (typeof content === 'string') payload.content = content;
-      return payload;
-    } catch (error) {
-      console.error('Failed to render stats card:', error);
-      if (typeof fallbackPayload === 'function') return fallbackPayload();
-
-      const fallback = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setTitle(title || 'Stats')
-        .setDescription('The stats card could not be rendered right now.');
-
-      const payload = { embeds: [fallback], components, attachments: [] };
-      if (typeof content === 'string') payload.content = content;
-      return payload;
-    }
+    if (typeof content === 'string') payload.content = content;
+    return payload;
   }
 
   formatTopValue(row, category) {
@@ -3226,4 +3220,5 @@ class StatsTracker {
 
 module.exports = {
   StatsTracker,
+  assertStatsImageRenderer,
 };
