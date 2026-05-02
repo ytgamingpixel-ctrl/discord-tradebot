@@ -2,6 +2,11 @@ require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const express = require('express');
+const app = express(); 
+const PORT = process.env.PORT || 8080;
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const {
   Client,
@@ -11,9 +16,11 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
+  ChannelType,
 } = require('discord.js');
 
-const { StatsTracker } = require('./tracker');
+// ... (Keep all your existing StatsTracker, ship-data imports, and client setup right below this!) ...
+const { StatsTracker, assertStatsImageRenderer } = require('./tracker');
 const {
   ensureShipData,
   getShipChoices,
@@ -28,16 +35,32 @@ const client = new Client({
     GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
 const tracker = new StatsTracker(client);
 tracker.init();
+const statsRendererBytes = assertStatsImageRenderer();
+console.log(`Stats image renderer ready (${statsRendererBytes} byte self-test PNG).`);
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ROUTE_HINT_TTL_MS = 30 * 60 * 1000;
 const PRICE_HISTORY_TTL_MS = 12 * 60 * 60 * 1000;
+const CITIZEN_CACHE_MINUTES = Number(process.env.CITIZEN_CACHE_MINUTES || 20);
+const CITIZEN_CACHE_TTL_MS = (Number.isFinite(CITIZEN_CACHE_MINUTES) ? Math.max(5, CITIZEN_CACHE_MINUTES) : 20) * 60 * 1000;
+const API_BASE_URL = String(process.env.API_BASE_URL || '').trim().replace(/\/+$/, '');
+const API_AUTH_TOKEN = String(process.env.API_AUTH_TOKEN || '').trim();
+const API_AUTH_HEADER = String(process.env.API_AUTH_HEADER || 'Authorization').trim();
+const API_AUTH_SCHEME = String(process.env.API_AUTH_SCHEME || 'Bearer').trim();
+const API_MEMBER_PROFILE_PATH = process.env.API_MEMBER_PROFILE_PATH || '/api/discord/{discordId}/profile';
+const API_RSI_LINK_PATH = process.env.API_RSI_LINK_PATH || '/api/discord/{discordId}/rsi';
+const PROMOTIONS_CHANNEL_ID = process.env.PROMOTIONS_CHANNEL_ID || null;
+const PROMOTE_ALLOWED_ROLE_IDS = String(process.env.PROMOTE_ALLOWED_ROLE_IDS || '')
+  .split(',')
+  .map(value => value.trim())
+  .filter(Boolean);
 
 const EMBED_THUMBNAIL_URL =
   'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
@@ -60,6 +83,7 @@ const cache = {
 };
 
 const routeStates = new Map();
+const citizenProfileCache = new Map();
 const activeMessageLocks = new Set();
 let marketDataWarmPromise = null;
 
@@ -75,6 +99,27 @@ function normalizeText(value) {
 
 function isUnknownInteractionError(error) {
   return Number(error?.code) === 10062 || /Unknown interaction/i.test(String(error?.message || ''));
+}
+
+const PUBLIC_CHAT_COMMANDS = new Set([
+  'citizen',
+  'me',
+  'route',
+  'best-routes',
+  'location',
+  'buyers',
+  'players',
+  'top',
+  'stats',
+  'server',
+  'ship',
+]);
+
+async function deferChatInputCommand(interaction) {
+  if (interaction.deferred || interaction.replied) return;
+  await interaction.deferReply({
+    ephemeral: interaction.commandName === 'promote' || !PUBLIC_CHAT_COMMANDS.has(interaction.commandName),
+  });
 }
 
 function clamp(value, min, max) {
@@ -447,23 +492,891 @@ function getRouteState(stateId) {
 }
 
 async function fetchJson(url) {
+  return fetchJsonWithHeaders(url, {
+    headers: {
+      'User-Agent': 'SPACEWHLE Trade Command Bot',
+      Accept: 'application/json',
+    },
+  });
+}
+
+function createHttpError(response, url) {
+  const error = new Error(`HTTP ${response.status} for ${url}`);
+  error.status = response.status;
+  error.url = url;
+  return error;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'SPACEWHLE Trade Command Bot',
-        Accept: 'application/json',
-      },
+    return await fetch(url, {
+      ...options,
       signal: controller.signal,
     });
-
-    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-    return await response.json();
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchJsonWithHeaders(url, options = {}) {
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: options.method || 'GET',
+      headers: options.headers || {},
+    },
+    options.timeoutMs || 20000,
+  );
+
+  if (!response.ok) throw createHttpError(response, url);
+  return await response.json();
+}
+
+async function fetchTextWithHeaders(url, options = {}) {
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: options.method || 'GET',
+      headers: options.headers || {},
+    },
+    options.timeoutMs || 20000,
+  );
+
+  if (!response.ok) throw createHttpError(response, url);
+  return await response.text();
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function renderPathTemplate(template, params = {}) {
+  return String(template || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
+    const value = params[key] ?? '';
+    return encodeURIComponent(String(value));
+  });
+}
+
+function buildApiUrl(pathTemplate, params = {}) {
+  const rendered = renderPathTemplate(pathTemplate, params);
+  if (/^https?:\/\//i.test(rendered)) return rendered;
+
+  if (!API_BASE_URL) {
+    const error = new Error('Website API is not configured.');
+    error.code = 'API_NOT_CONFIGURED';
+    throw error;
+  }
+
+  const separator = rendered.startsWith('/') ? '' : '/';
+  return `${API_BASE_URL}${separator}${rendered}`;
+}
+
+function buildWebsiteApiHeaders() {
+  const headers = {
+    'User-Agent': 'SPACEWHLE Trade Command Bot',
+    Accept: 'application/json',
+  };
+
+  if (API_AUTH_TOKEN && API_AUTH_HEADER) {
+    headers[API_AUTH_HEADER] = API_AUTH_SCHEME.toLowerCase() === 'none'
+      ? API_AUTH_TOKEN
+      : `${API_AUTH_SCHEME} ${API_AUTH_TOKEN}`.trim();
+  }
+
+  return headers;
+}
+
+async function fetchWebsiteJson(pathTemplate, params = {}) {
+  const url = buildApiUrl(pathTemplate, params);
+  return fetchJsonWithHeaders(url, {
+    headers: buildWebsiteApiHeaders(),
+    timeoutMs: 12000,
+  });
+}
+
+function unwrapObjectPayload(payload) {
+  let current = payload;
+
+  for (let i = 0; i < 5; i += 1) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
+
+    const nextKey = ['data', 'result', 'member', 'profile'].find(key =>
+      current[key] && typeof current[key] === 'object' && !Array.isArray(current[key])
+    );
+
+    if (!nextKey) return current;
+    current = current[nextKey];
+  }
+
+  return current;
+}
+
+function getPathValue(obj, pathName) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  return String(pathName)
+    .split('.')
+    .reduce((current, key) => (current == null ? undefined : current[key]), obj);
+}
+
+function firstDefinedPath(obj, paths) {
+  for (const pathName of paths) {
+    const value = getPathValue(obj, pathName);
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+
+  return null;
+}
+
+function stringifyProfileValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+
+  if (Array.isArray(value)) {
+    const values = value.map(item => stringifyProfileValue(item)).filter(Boolean);
+    return values.length ? values.join(', ') : null;
+  }
+
+  if (typeof value === 'object') {
+    for (const key of ['name', 'title', 'label', 'displayName', 'value', 'rank', 'position']) {
+      const text = stringifyProfileValue(value[key]);
+      if (text) return text;
+    }
+  }
+
+  return null;
+}
+
+function pickStringPath(obj, paths) {
+  return stringifyProfileValue(firstDefinedPath(obj, paths));
+}
+
+function formatProfileMetric(value, fallback = 'Unknown') {
+  const text = stringifyProfileValue(value);
+  return text || fallback;
+}
+
+function parseDateValue(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.valueOf())) return value;
+
+  if (typeof value === 'number') {
+    const date = new Date(value > 100000000000 ? value : value * 1000);
+    return Number.isNaN(date.valueOf()) ? null : date;
+  }
+
+  const text = stringifyProfileValue(value);
+  if (!text) return null;
+
+  if (/^\d+$/.test(text)) {
+    const numeric = Number(text);
+    if (Number.isFinite(numeric)) return parseDateValue(numeric);
+  }
+
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed;
+}
+
+function formatDateValue(value, fallback = 'Unknown') {
+  const date = parseDateValue(value);
+  if (!date) return stringifyProfileValue(value) || fallback;
+  return `<t:${Math.floor(date.getTime() / 1000)}:D>`;
+}
+
+function formatDurationSince(value, fallback = 'Unknown') {
+  const date = parseDateValue(value);
+  if (!date) return fallback;
+
+  const days = Math.max(0, Math.floor((Date.now() - date.getTime()) / (24 * 60 * 60 * 1000)));
+  if (days <= 0) return 'Today';
+
+  const years = Math.floor(days / 365.25);
+  const months = Math.floor((days - years * 365.25) / 30.44);
+  if (years > 0 && months > 0) return `${years}y ${months}m`;
+  if (years > 0) return `${years}y`;
+  if (months > 0) return `${months}m`;
+  return `${days}d`;
+}
+
+function formatLeaderboardPosition(value) {
+  const text = stringifyProfileValue(value);
+  if (!text || text === '0') return 'Unranked';
+
+  const numeric = Number(String(text).replace(/[^\d.-]/g, ''));
+  if (Number.isFinite(numeric) && numeric > 0 && /^#?\d+/.test(String(text).trim())) {
+    return `#${Math.round(numeric).toLocaleString('en-GB')}`;
+  }
+
+  return text.startsWith('#') ? text : text;
+}
+
+function formatRequirementsRemaining(value) {
+  if (value === null || value === undefined || value === '') return null;
+
+  if (Array.isArray(value)) {
+    const rows = value.map(item => stringifyProfileValue(item)).filter(Boolean);
+    return rows.length ? rows.slice(0, 8).join('\n').slice(0, 1024) : null;
+  }
+
+  if (typeof value === 'object') {
+    const rows = Object.entries(value)
+      .map(([key, item]) => {
+        const text = stringifyProfileValue(item);
+        return text ? `${key}: ${text}` : null;
+      })
+      .filter(Boolean);
+
+    return rows.length ? rows.slice(0, 8).join('\n').slice(0, 1024) : null;
+  }
+
+  return stringifyProfileValue(value);
+}
+
+function normalizeMemberProfile(payload, discordUser) {
+  const profile = unwrapObjectPayload(payload);
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return null;
+
+  const leaderboardActivity = firstDefinedPath(profile, [
+    'leaderboard.activity',
+    'leaderboard.activity.rank',
+    'leaderboard.activity.position',
+    'leaderboards.activity',
+    'leaderboards.activity.rank',
+    'leaderboards.activity.position',
+    'leaderboardPositions.activity',
+    'activityLeaderboardPosition',
+    'activity_position',
+    'activityRank',
+  ]);
+  const leaderboardAttendance = firstDefinedPath(profile, [
+    'leaderboard.attendance',
+    'leaderboard.attendance.rank',
+    'leaderboard.attendance.position',
+    'leaderboards.attendance',
+    'leaderboards.attendance.rank',
+    'leaderboards.attendance.position',
+    'leaderboardPositions.attendance',
+    'attendanceLeaderboardPosition',
+    'attendance_position',
+    'attendanceRank',
+  ]);
+  const leaderboardParticipation = firstDefinedPath(profile, [
+    'leaderboard.participation',
+    'leaderboard.participation.rank',
+    'leaderboard.participation.position',
+    'leaderboards.participation',
+    'leaderboards.participation.rank',
+    'leaderboards.participation.position',
+    'leaderboardPositions.participation',
+    'participationLeaderboardPosition',
+    'participation_position',
+    'participationRank',
+  ]);
+  const nextRank = pickStringPath(profile, [
+    'promotionProgress.nextRank',
+    'promotion_progress.next_rank',
+    'progress.nextRank',
+    'nextRank',
+    'next_rank',
+  ]);
+  const requirementsRemaining = firstDefinedPath(profile, [
+    'promotionProgress.requirementsRemaining',
+    'promotion_progress.requirements_remaining',
+    'promotionProgress.remaining',
+    'progress.requirementsRemaining',
+    'requirementsRemaining',
+    'requirements_remaining',
+  ]);
+
+  return {
+    username: pickStringPath(profile, ['username', 'displayName', 'display_name', 'name', 'handle'])
+      || discordUser.globalName
+      || discordUser.username
+      || 'Member',
+    rank: pickStringPath(profile, ['rank', 'rank.name', 'currentRank', 'current_rank', 'orgRank', 'org_rank']),
+    joinDate: firstDefinedPath(profile, ['joinDate', 'join_date', 'joinedAt', 'joined_at', 'organisationJoinDate', 'organizationJoinDate']),
+    eventsAttended: firstDefinedPath(profile, ['eventsAttended', 'events_attended', 'attendance.events', 'stats.eventsAttended']),
+    activityScore: firstDefinedPath(profile, ['activityScore', 'activity_score', 'score.activity', 'stats.activityScore']),
+    attendanceStreak: firstDefinedPath(profile, ['attendanceStreak', 'attendance_streak', 'streak.attendance', 'stats.attendanceStreak']),
+    leaderboard: {
+      activity: leaderboardActivity,
+      attendance: leaderboardAttendance,
+      participation: leaderboardParticipation,
+    },
+    promotion: {
+      nextRank,
+      requirementsRemaining,
+    },
+  };
+}
+
+function buildMemberProfileEmbed(profile, discordUser) {
+  const embed = new EmbedBuilder()
+    .setColor(0x22d3ee)
+    .setTitle(`${profile.username}'s Profile`)
+    .setThumbnail(discordUser.displayAvatarURL({ size: 128 }))
+    .addFields(
+      { name: 'Rank', value: formatProfileMetric(profile.rank), inline: true },
+      { name: 'Time in Organisation', value: formatDurationSince(profile.joinDate), inline: true },
+      { name: 'Events Attended', value: formatProfileMetric(profile.eventsAttended), inline: true },
+      { name: 'Activity Score', value: formatProfileMetric(profile.activityScore), inline: true },
+      { name: 'Attendance Streak', value: formatProfileMetric(profile.attendanceStreak), inline: true },
+      {
+        name: 'Leaderboard',
+        value: [
+          `Activity: ${formatLeaderboardPosition(profile.leaderboard.activity)}`,
+          `Attendance: ${formatLeaderboardPosition(profile.leaderboard.attendance)}`,
+          `Participation: ${formatLeaderboardPosition(profile.leaderboard.participation)}`,
+        ].join('\n'),
+        inline: false,
+      },
+    );
+
+  const progressLines = [];
+  if (profile.promotion.nextRank) progressLines.push(`Next Rank: ${profile.promotion.nextRank}`);
+
+  const requirementsRemaining = formatRequirementsRemaining(profile.promotion.requirementsRemaining);
+  if (requirementsRemaining) progressLines.push(`Requirements Remaining: ${requirementsRemaining}`);
+
+  if (progressLines.length) {
+    embed.addFields({
+      name: 'Progress',
+      value: progressLines.join('\n').slice(0, 1024),
+      inline: false,
+    });
+  }
+
+  return embed;
+}
+
+async function handleMeCommand(interaction) {
+  await deferChatInputCommand(interaction);
+
+  try {
+    const payload = await fetchWebsiteJson(API_MEMBER_PROFILE_PATH, {
+      discordId: interaction.user.id,
+      userId: interaction.user.id,
+    });
+    const profile = normalizeMemberProfile(payload, interaction.user);
+
+    if (!profile) {
+      await interaction.editReply('I found a profile response, but it did not include usable member data yet.');
+      return;
+    }
+
+    await interaction.editReply({ embeds: [buildMemberProfileEmbed(profile, interaction.user)] });
+  } catch (error) {
+    if (error.code === 'API_NOT_CONFIGURED') {
+      await interaction.editReply('The member profile API is not configured yet. Set `API_BASE_URL` and, if needed, `API_MEMBER_PROFILE_PATH`.');
+      return;
+    }
+
+    if (Number(error.status) === 404) {
+      await interaction.editReply('I could not find a linked organisation profile for you yet. Link your account on the website, then try again.');
+      return;
+    }
+
+    if (Number(error.status) === 401 || Number(error.status) === 403) {
+      await interaction.editReply('The profile API rejected the bot request. Check the API auth environment settings.');
+      return;
+    }
+
+    console.error('Member profile lookup failed:', error);
+    await interaction.editReply('I could not load your profile right now. Try again in a minute.');
+  }
+}
+
+function getHtmlAttr(tag, attrName) {
+  const pattern = new RegExp(`${attrName}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i');
+  const match = String(tag || '').match(pattern);
+  return match ? (match[2] || match[3] || match[4] || '').trim() : null;
+}
+
+function extractMetaContent(html, names) {
+  const wanted = new Set(names.map(name => name.toLowerCase()));
+  const tags = String(html || '').match(/<meta\b[^>]*>/gi) || [];
+
+  for (const tag of tags) {
+    const name = (getHtmlAttr(tag, 'property') || getHtmlAttr(tag, 'name') || '').toLowerCase();
+    if (!wanted.has(name)) continue;
+
+    const content = getHtmlAttr(tag, 'content');
+    if (content) return content;
+  }
+
+  return null;
+}
+
+function decodeHtmlEntities(value) {
+  const entities = {
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    quot: '"',
+    apos: "'",
+    nbsp: ' ',
+  };
+
+  return String(value || '').replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity) => {
+    const key = entity.toLowerCase();
+    if (key.startsWith('#x')) return String.fromCodePoint(parseInt(key.slice(2), 16));
+    if (key.startsWith('#')) return String.fromCodePoint(parseInt(key.slice(1), 10));
+    return entities[key] || match;
+  });
+}
+
+function htmlToTextLines(html) {
+  const text = String(html || '')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(br|p|div|li|section|article|header|footer|h[1-6]|dt|dd)\b[^>]*>/gi, '\n')
+    .replace(/<\/(p|div|li|section|article|header|footer|h[1-6]|dt|dd)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  return decodeHtmlEntities(text)
+    .split(/\n+/)
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function isUsefulCitizenLine(line) {
+  return !/^(image|overview|organizations?|profile|citizen dossier)$/i.test(String(line || '').trim());
+}
+
+function extractLineValue(lines, label) {
+  const labelText = String(label || '').toLowerCase();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const lower = line.toLowerCase();
+
+    if (lower === labelText) {
+      for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+        if (isUsefulCitizenLine(lines[nextIndex])) return lines[nextIndex];
+      }
+    }
+
+    if (lower.startsWith(`${labelText} `) || lower.startsWith(`${labelText}:`)) {
+      const value = line.slice(label.length).replace(/^[:\s]+/, '').trim();
+      if (value) return value;
+    }
+  }
+
+  return null;
+}
+
+function absoluteRsiUrl(value) {
+  const url = String(value || '').trim();
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith('//')) return `https:${url}`;
+  if (url.startsWith('/')) return `https://robertsspaceindustries.com${url}`;
+  return `https://robertsspaceindustries.com/${url}`;
+}
+
+function extractCitizenImageUrl(html) {
+  const metaImage = extractMetaContent(html, ['og:image', 'twitter:image']);
+  if (metaImage) return absoluteRsiUrl(metaImage);
+
+  const imgTags = String(html || '').match(/<img\b[^>]*>/gi) || [];
+  for (const tag of imgTags) {
+    const src = getHtmlAttr(tag, 'src');
+    if (!src || /logo|icon|badge/i.test(src)) continue;
+    if (/\/media\//i.test(src) || /profile/i.test(tag)) return absoluteRsiUrl(src);
+  }
+
+  return null;
+}
+
+function parseCitizenProfileHtml(html, username, profileUrl) {
+  const lines = htmlToTextLines(html);
+  const metaTitle = extractMetaContent(html, ['og:title', 'twitter:title']);
+  const displayFromTitle = metaTitle
+    ? decodeHtmlEntities(metaTitle).split('|')[0].trim()
+    : null;
+  const displayName = extractLineValue(lines, 'Handle name') || displayFromTitle || username;
+  const enlisted = extractLineValue(lines, 'Enlisted');
+  const organisation = extractLineValue(lines, 'Main organization') || extractLineValue(lines, 'Main organisation');
+  const organisationRank = extractLineValue(lines, 'Organization rank') || extractLineValue(lines, 'Organisation rank');
+  const location = extractLineValue(lines, 'Location');
+  const bio = extractLineValue(lines, 'Bio') || extractLineValue(lines, 'Biography');
+
+  return {
+    username,
+    profileUrl,
+    displayName,
+    enlisted,
+    organisation,
+    organisationRank,
+    location,
+    bio,
+    imageUrl: extractCitizenImageUrl(html),
+  };
+}
+
+async function fetchCitizenProfile(username) {
+  const normalized = normalizeText(username);
+  const cached = citizenProfileCache.get(normalized);
+  if (cached && cached.expiresAt > Date.now()) return cached.profile;
+
+  const profileUrl = `https://robertsspaceindustries.com/citizens/${encodeURIComponent(username)}`;
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const html = await fetchTextWithHeaders(profileUrl, {
+        headers: {
+          'User-Agent': 'SPACEWHLE Trade Command Bot',
+          Accept: 'text/html',
+        },
+        timeoutMs: 12000,
+      });
+      const profile = parseCitizenProfileHtml(html, username, profileUrl);
+      citizenProfileCache.set(normalized, {
+        expiresAt: Date.now() + CITIZEN_CACHE_TTL_MS,
+        profile,
+      });
+      return profile;
+    } catch (error) {
+      if (Number(error.status) === 404) throw error;
+      lastError = error;
+      if (attempt === 0) await sleep(500);
+    }
+  }
+
+  throw lastError;
+}
+
+function extractLinkedRsiHandle(payload) {
+  const data = unwrapObjectPayload(payload);
+  return pickStringPath(data, [
+    'rsiHandle',
+    'rsi_handle',
+    'rsiUsername',
+    'rsi_username',
+    'citizenHandle',
+    'citizen_handle',
+    'handle',
+    'username',
+    'rsi.handle',
+    'rsi.username',
+    'starCitizen.handle',
+    'starCitizen.username',
+    'star_citizen.handle',
+    'star_citizen.username',
+  ]);
+}
+
+async function fetchLinkedRsiHandle(discordUserId) {
+  const payload = await fetchWebsiteJson(API_RSI_LINK_PATH, {
+    discordId: discordUserId,
+    userId: discordUserId,
+  });
+
+  return extractLinkedRsiHandle(payload);
+}
+
+function buildCitizenEmbed(profile) {
+  const embed = new EmbedBuilder()
+    .setColor(0x38bdf8)
+    .setTitle(profile.displayName || profile.username)
+    .setURL(profile.profileUrl)
+    .addFields(
+      { name: 'Enlisted', value: formatDateValue(profile.enlisted), inline: true },
+      { name: 'Organisation', value: profile.organisation || 'None listed', inline: true },
+      { name: 'Rank', value: profile.organisationRank || 'Unknown', inline: true },
+      { name: 'Account Age', value: formatDurationSince(profile.enlisted), inline: true },
+    )
+    .setFooter({ text: 'Data from public RSI profile' });
+
+  if (profile.location) {
+    embed.addFields({ name: 'Location', value: profile.location, inline: true });
+  }
+
+  if (profile.bio) {
+    embed.setDescription(profile.bio.slice(0, 500));
+  }
+
+  if (profile.imageUrl) {
+    embed.setThumbnail(profile.imageUrl);
+  }
+
+  return embed;
+}
+
+async function handleCitizenCommand(interaction) {
+  await deferChatInputCommand(interaction);
+
+  const usernameInput = interaction.options.getString('username', false)?.trim();
+  const linkedUser = interaction.options.getUser('user', false);
+  let username = usernameInput;
+
+  if (!username && linkedUser) {
+    try {
+      username = await fetchLinkedRsiHandle(linkedUser.id);
+    } catch (error) {
+      if (error.code === 'API_NOT_CONFIGURED' || Number(error.status) === 404) {
+        await interaction.editReply('That Discord user does not have a linked RSI handle yet. Ask them to link their account on the website, or provide `username` directly.');
+        return;
+      }
+
+      console.error('Linked RSI lookup failed:', error);
+      await interaction.editReply('I could not resolve that user\'s linked RSI handle right now.');
+      return;
+    }
+  }
+
+  if (!username) {
+    await interaction.editReply('Provide a Star Citizen handle with `username`, or choose a Discord `user` who has linked their RSI handle.');
+    return;
+  }
+
+  try {
+    const profile = await fetchCitizenProfile(username);
+    await interaction.editReply({ embeds: [buildCitizenEmbed(profile)] });
+  } catch (error) {
+    if (Number(error.status) === 404) {
+      await interaction.editReply(`I could not find a public RSI profile for \`${username}\`.`);
+      return;
+    }
+
+    console.error('Citizen profile lookup failed:', error);
+    await interaction.editReply('I could not fetch that public RSI profile right now. Try again in a minute.');
+  }
+}
+
+function escapeDiscordMarkdown(value) {
+  return String(value || '').replace(/([\\`*_~|>])/g, '\\$1');
+}
+
+function resolveRoleToken(guild, token) {
+  const raw = String(token || '').trim();
+  if (!raw) return null;
+
+  const id = raw.match(/^<@&(\d{17,20})>$/)?.[1] || raw.match(/^\d{17,20}$/)?.[0];
+  if (id) return guild.roles.cache.get(id) || null;
+
+  const normalized = normalizeText(raw);
+  return guild.roles.cache.find(role => normalizeText(role.name) === normalized) || null;
+}
+
+function resolveRoleListInput(guild, input) {
+  const roles = [];
+  const unresolved = [];
+  const text = String(input || '').trim();
+  if (!text) return { roles, unresolved };
+
+  const idPattern = /<@&(\d{17,20})>|\b(\d{17,20})\b/g;
+  const matchedRanges = [];
+
+  for (const match of text.matchAll(idPattern)) {
+    const roleId = match[1] || match[2];
+    const role = guild.roles.cache.get(roleId);
+    if (role) roles.push(role);
+    else unresolved.push(match[0]);
+    matchedRanges.push([match.index, match.index + match[0].length]);
+  }
+
+  let remaining = '';
+  for (let index = 0; index < text.length; index += 1) {
+    if (matchedRanges.some(([start, end]) => index >= start && index < end)) continue;
+    remaining += text[index];
+  }
+
+  const nameTokens = remaining
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+
+  for (const token of nameTokens) {
+    const role = resolveRoleToken(guild, token);
+    if (role) roles.push(role);
+    else unresolved.push(token);
+  }
+
+  return {
+    roles: Array.from(new Map(roles.map(role => [role.id, role])).values()),
+    unresolved,
+  };
+}
+
+function roleHierarchyError(role, managerMember, actorMember, guild) {
+  if (!role || role.id === guild.id) return 'The @everyone role cannot be managed.';
+  if (role.managed) return `I cannot manage the managed role "${role.name}".`;
+
+  if (role.position >= managerMember.roles.highest.position) {
+    return `My highest role must be above "${role.name}" before I can manage it.`;
+  }
+
+  if (actorMember.id !== guild.ownerId && role.position >= actorMember.roles.highest.position) {
+    return `Your highest role must be above "${role.name}" before you can assign or remove it.`;
+  }
+
+  return null;
+}
+
+function canRunPromotionCommand(member) {
+  if (!member) return false;
+  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
+  if (member.permissions?.has(PermissionFlagsBits.ManageRoles)) return true;
+  return PROMOTE_ALLOWED_ROLE_IDS.some(roleId => member.roles.cache.has(roleId));
+}
+
+async function resolvePromotionChannel(interaction, managerMember) {
+  const requestedChannel = interaction.options.getChannel('channel', false);
+  const channel = requestedChannel || (PROMOTIONS_CHANNEL_ID
+    ? await interaction.guild.channels.fetch(PROMOTIONS_CHANNEL_ID).catch(() => null)
+    : null);
+
+  if (!channel) {
+    return {
+      error: requestedChannel
+        ? 'I could not use that announcement channel.'
+        : 'No promotions channel is configured. Set `PROMOTIONS_CHANNEL_ID` or provide `channel`.',
+    };
+  }
+
+  if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type) || !channel.isTextBased()) {
+    return { error: 'Promotion announcements must be sent to a text or announcement channel.' };
+  }
+
+  const permissions = channel.permissionsFor(managerMember);
+  if (!permissions?.has(PermissionFlagsBits.ViewChannel) || !permissions?.has(PermissionFlagsBits.SendMessages)) {
+    return { error: `I cannot send promotion announcements in ${channel}.` };
+  }
+
+  return { channel };
+}
+
+function buildPromotionAnnouncement(targetMember, rankRole, addedRoles, customMessage) {
+  const rolesList = addedRoles
+    .map(role => `- ${escapeDiscordMarkdown(role.name)}`)
+    .join('\n');
+  const parts = [
+    '\u{1F389} **Promotion Announcement**',
+    `Congratulations to ${targetMember} on being promoted to **${escapeDiscordMarkdown(rankRole.name)}**.`,
+    `**Roles Received:**\n${rolesList}`,
+  ];
+
+  if (customMessage) parts.push(customMessage);
+  return parts.join('\n\n');
+}
+
+async function handlePromoteCommand(interaction) {
+  await deferChatInputCommand(interaction);
+
+  if (!interaction.guild) {
+    await interaction.editReply('Promotions can only be run inside a server.');
+    return;
+  }
+
+  const actorMember = await interaction.guild.members.fetch(interaction.user.id);
+  if (!canRunPromotionCommand(actorMember)) {
+    await interaction.editReply('You need a staff role, Administrator, or Manage Roles permission to use `/promote`.');
+    return;
+  }
+
+  const managerMember = interaction.guild.members.me || await interaction.guild.members.fetchMe();
+  if (!managerMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    await interaction.editReply('I need the Manage Roles permission before I can promote members.');
+    return;
+  }
+
+  const targetUser = interaction.options.getUser('user', true);
+  const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+  if (!targetMember) {
+    await interaction.editReply('I could not find that member in this server.');
+    return;
+  }
+
+  if (targetMember.id === interaction.guild.ownerId) {
+    await interaction.editReply('I cannot change roles for the server owner.');
+    return;
+  }
+
+  if (targetMember.roles.highest.position >= managerMember.roles.highest.position && targetMember.id !== managerMember.id) {
+    await interaction.editReply('My highest role must be above the member I am promoting.');
+    return;
+  }
+
+  const rankRoleOption = interaction.options.getRole('rank_role', true);
+  const rankRole = interaction.guild.roles.cache.get(rankRoleOption.id);
+  if (!rankRole) {
+    await interaction.editReply('I could not resolve that rank role.');
+    return;
+  }
+
+  const extraRolesInput = interaction.options.getString('extra_roles', false);
+  const removeRolesInput = interaction.options.getString('remove_roles', false);
+  const customMessage = interaction.options.getString('custom_message', false)?.trim();
+  const extraResult = resolveRoleListInput(interaction.guild, extraRolesInput);
+  const removeResult = resolveRoleListInput(interaction.guild, removeRolesInput);
+
+  if (extraResult.unresolved.length || removeResult.unresolved.length) {
+    await interaction.editReply(`I could not resolve these roles: ${[...extraResult.unresolved, ...removeResult.unresolved].map(value => `\`${value}\``).join(', ')}.`);
+    return;
+  }
+
+  const rolesToAdd = Array.from(new Map([rankRole, ...extraResult.roles].map(role => [role.id, role])).values());
+  const rolesToRemove = Array.from(new Map(removeResult.roles.map(role => [role.id, role])).values());
+  const overlap = rolesToRemove.find(role => rolesToAdd.some(addedRole => addedRole.id === role.id));
+  if (overlap) {
+    await interaction.editReply(`"${overlap.name}" cannot be both added and removed in the same promotion.`);
+    return;
+  }
+
+  for (const role of [...rolesToAdd, ...rolesToRemove]) {
+    const error = roleHierarchyError(role, managerMember, actorMember, interaction.guild);
+    if (error) {
+      await interaction.editReply(error);
+      return;
+    }
+  }
+
+  const channelResult = await resolvePromotionChannel(interaction, managerMember);
+  if (channelResult.error) {
+    await interaction.editReply(channelResult.error);
+    return;
+  }
+
+  try {
+    if (rolesToAdd.length) {
+      await targetMember.roles.add(rolesToAdd, `Promotion by ${interaction.user.tag}`);
+    }
+
+    if (rolesToRemove.length) {
+      await targetMember.roles.remove(rolesToRemove, `Promotion by ${interaction.user.tag}`);
+    }
+  } catch (error) {
+    console.error('Promotion role update failed:', error);
+    await interaction.editReply('I could not update those roles. Check my permissions and role hierarchy, then try again.');
+    return;
+  }
+
+  try {
+    const announcement = buildPromotionAnnouncement(targetMember, rankRole, rolesToAdd, customMessage);
+    await channelResult.channel.send({
+      content: announcement,
+      allowedMentions: {
+        users: [targetMember.id],
+        roles: [],
+        repliedUser: false,
+      },
+    });
+  } catch (error) {
+    console.error('Promotion announcement failed:', error);
+    await interaction.editReply('The roles were updated, but I could not send the promotion announcement.');
+    return;
+  }
+
+  const removedText = rolesToRemove.length
+    ? ` Removed: ${rolesToRemove.map(role => role.name).join(', ')}.`
+    : '';
+  await interaction.editReply(`Promoted ${targetMember} to ${rankRole.name} and announced it in ${channelResult.channel}.${removedText}`);
 }
 
 function getRiskLabel(score) {
@@ -1604,7 +2517,9 @@ async function handleAutocomplete(interaction) {
   const focused = interaction.options.getFocused(true);
 
   if (focused.name === 'ship') {
-    await ensureShipData(false);
+    void ensureShipData(false).catch(error => {
+      console.error('Background ship data warm failed:', error);
+    });
     await interaction.respond(pickAutocompleteChoices(getShipChoices(), focused.value));
     return;
   }
@@ -1945,6 +2860,22 @@ client.on(Events.InteractionCreate, async interaction => {
         await tracker.handleButton(interaction);
         return;
       }
+
+      if (parts[0] === 'logistics') {
+        if (parts[1] === 'close') {
+          const channelId = parts[2];
+          const channel = interaction.guild?.channels.cache.get(channelId);
+          if (channel) {
+            await closeLogisticsTicket(interaction, channel);
+          } else {
+            await interaction.followUp({
+              content: 'Could not find that ticket channel.',
+              ephemeral: true,
+            });
+          }
+        }
+        return;
+      }
     } catch (error) {
       console.error('Button error:', error);
       void sendAlert({
@@ -1971,8 +2902,25 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    await deferChatInputCommand(interaction);
+
+    if (interaction.commandName === 'promote') {
+      await handlePromoteCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === 'citizen') {
+      await handleCitizenCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === 'me') {
+      await handleMeCommand(interaction);
+      return;
+    }
+
     if (interaction.commandName === 'route') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
 
       const response = await buildRouteResponse({
         shipName: interaction.options.getString('ship', true),
@@ -1988,7 +2936,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'best-routes') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await loadMarketData(false);
 
       const locationInput = interaction.options.getString('location');
@@ -2079,7 +3027,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'location') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await loadMarketData(false);
 
       const locationInput = interaction.options.getString('location', true);
@@ -2125,7 +3073,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'buyers') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await loadMarketData(false);
 
       const commodityInput = interaction.options.getString('commodity', true);
@@ -2191,19 +3139,19 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'players') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await interaction.editReply(tracker.buildPlayersEmbed(interaction.guild, 7));
       return;
     }
 
     if (interaction.commandName === 'top') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await interaction.editReply(await tracker.buildTopEmbed(7));
       return;
     }
 
     if (interaction.commandName === 'stats') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       const subcommand = interaction.options.getSubcommand(false);
       const user = interaction.options.getUser('user', false);
 
@@ -2227,13 +3175,13 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.commandName === 'server') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await interaction.editReply(await tracker.buildServerStatsEmbed(7));
       return;
     }
 
     if (interaction.commandName === 'ship') {
-      await interaction.deferReply();
+      await deferChatInputCommand(interaction);
       await ensureShipData(false);
       const shipName = interaction.options.getString('ship', true);
       const ship = getShipProfile(shipName);
@@ -2260,6 +3208,19 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await interaction.editReply({ embeds: [embed] });
       return;
+    }
+
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({
+        content: `I do not have a handler for \`/${interaction.commandName}\` in this build.`,
+        embeds: [],
+        components: [],
+      });
+    } else {
+      await interaction.reply({
+        content: `I do not have a handler for \`/${interaction.commandName}\` in this build.`,
+        ephemeral: true,
+      });
     }
   } catch (error) {
     console.error('Interaction error:', error);
@@ -2288,5 +3249,212 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 });
+// ==============================================================================
+// === LOGISTICS TICKET FUNCTIONS ===
+// ==============================================================================
 
+const LOGISTICS_CLOSE_ALLOWED_ROLES = String(process.env.LOGISTICS_CLOSE_ALLOWED_ROLES || '')
+  .split(',')
+  .map(value => value.trim())
+  .filter(Boolean);
+const LOGISTICS_TRANSCRIPT_CHANNEL_ID = process.env.LOGISTICS_TRANSCRIPT_CHANNEL_ID || null;
+
+function canCloseLogisticsTicket(member) {
+  if (!member) return false;
+  // Check if they have Administrator permission
+  if (member.permissions?.has(PermissionFlagsBits.Administrator)) return true;
+  // Check if they have any of the allowed roles
+  return LOGISTICS_CLOSE_ALLOWED_ROLES.some(roleId => {
+    const resolvedRole = resolveRoleToken(member.guild, roleId);
+    return resolvedRole && member.roles.cache.has(resolvedRole.id);
+  });
+}
+
+async function generateTicketTranscript(channel) {
+  try {
+    const messages = await channel.messages.fetch({ limit: 100 });
+    const sortedMessages = Array.from(messages.values()).reverse();
+    
+    let transcript = `Logistics Ticket Transcript: ${channel.name}\n`;
+    transcript += `Generated: ${new Date().toISOString()}\n`;
+    transcript += `Channel: ${channel.name}\n`;
+    transcript += `=`.repeat(60) + '\n\n';
+    
+    for (const msg of sortedMessages) {
+      const timestamp = msg.createdAt.toISOString();
+      const author = msg.author.username;
+      const content = msg.content || '(no text content)';
+      transcript += `[${timestamp}] ${author}: ${content}\n`;
+      
+      if (msg.embeds.length > 0) {
+        transcript += `  [Embed: ${msg.embeds[0].title || 'Untitled'}]\n`;
+      }
+    }
+    
+    return transcript;
+  } catch (error) {
+    console.error('Failed to generate transcript:', error);
+    return null;
+  }
+}
+
+async function closeLogisticsTicket(interaction, channel) {
+  try {
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    
+    if (!canCloseLogisticsTicket(member)) {
+      await interaction.reply({
+        content: 'You do not have permission to close this logistics ticket.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // Generate transcript
+    const transcript = await generateTicketTranscript(channel);
+    
+    // Send transcript to transcript channel if configured
+    if (LOGISTICS_TRANSCRIPT_CHANNEL_ID && transcript) {
+      try {
+        const transcriptChannel = await interaction.guild.channels.fetch(LOGISTICS_TRANSCRIPT_CHANNEL_ID);
+        if (transcriptChannel && transcriptChannel.isTextBased()) {
+          const transcriptEmbed = new EmbedBuilder()
+            .setTitle(`Transcript: ${channel.name}`)
+            .setColor(0x808080)
+            .setDescription(`\`\`\`\n${transcript.slice(0, 4000)}\n\`\`\``)
+            .setFooter({ text: `Closed by ${interaction.user.username}` })
+            .setTimestamp();
+          
+          await transcriptChannel.send({ embeds: [transcriptEmbed] });
+          console.log(`✅ Transcript saved for ${channel.name}`);
+        }
+      } catch (transcriptError) {
+        console.error('Failed to save transcript:', transcriptError);
+      }
+    }
+
+    // Delete the channel
+    await interaction.reply({
+      content: 'Closing this logistics ticket...',
+      ephemeral: true,
+    });
+    
+    await channel.delete(`Closed by ${interaction.user.tag}`);
+    console.log(`✅ Closed ticket channel: ${channel.name}`);
+    
+  } catch (error) {
+    console.error('Error closing ticket:', error);
+    await interaction.reply({
+      content: 'Failed to close the ticket. Check bot permissions.',
+      ephemeral: true,
+    });
+  }
+}
+
+// ==============================================================================
+// === EXPRESS WEB SERVER FOR SUPABASE WEBHOOKS (LOGISTICS TICKET SYSTEM) ===
+// ==============================================================================
+
+// Set up your secret key (You should ideally put WEBHOOK_SECRET=YourSecret in your .env file)
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "space_whale_secure_123";
+
+app.post('/supabase-webhook', async (req, res) => {
+    console.log("\n-----------------------------------------");
+    console.log("📩 NEW WEBHOOK RECEIVED");
+    console.log("Headers:", req.headers);
+    console.log("Body:", JSON.stringify(req.body, null, 2));
+
+    // --- SECURITY CHECK ---
+    // Make sure the request is actually coming from Supabase
+  //  const incomingSecret = req.headers['x-supabase-key'];
+    // if (incomingSecret !== WEBHOOK_SECRET) {
+      //  console.warn("⚠️ UNAUTHORIZED: Webhook hit without the correct secret key!");
+       // return res.status(401).send('Unauthorized');
+   // }
+
+    const order = req.body?.record; 
+
+    if (order) {
+        const guild = client.guilds.cache.get(process.env.GUILD_ID);
+        const categoryId = process.env.LOGISTICS_CATEGORY_ID;
+        
+        if (guild && categoryId) {
+            try {
+                // 1. Calculate the next ticket number
+                const category = guild.channels.cache.get(categoryId);
+                const ticketNumber = category ? (category.children.cache.size + 1) : "x";
+                
+                // 2. Name the channel sequentially
+                const safeChannelName = `logistics-request-${ticketNumber}`;
+
+                // 3. Create the text channel
+                const ticketChannel = await guild.channels.create({
+                    name: safeChannelName,
+                    type: ChannelType.GuildText,
+                    parent: categoryId,
+                    reason: `Logistics Order #${ticketNumber} created via Website`,
+                });
+
+                // 4. Setup Pings
+                const requesterPing = `<@${order.user_discord_id}>`;
+                const rolePing = process.env.LOGISTICS_ROLE_ID ? `<@&${process.env.LOGISTICS_ROLE_ID}>` : "";
+
+                const embed = new EmbedBuilder()
+                    .setTitle(`📦 Logistics Request #${ticketNumber}`)
+                    .setColor(0x027320)
+                    .setDescription(`New request submitted by ${requesterPing}`)
+                    .addFields(
+                        { name: "Item Requested", value: order.item || "Unknown", inline: true },
+                        { name: "Quantity", value: order.quantity ? order.quantity.toString() : "N/A", inline: true },
+                        { name: "Delivery Location", value: order.location || "Not specified", inline: false }
+                    )
+                    .setFooter({ text: "Use this channel to coordinate. Delete when complete." })
+                    .setTimestamp();
+
+                // 5. Create close button
+                const closeButton = new ButtonBuilder()
+                  .setCustomId(`logistics:close:${ticketChannel.id}`)
+                  .setLabel('Close Ticket')
+                  .setStyle(ButtonStyle.Danger);
+                
+                const buttonRow = new ActionRowBuilder().addComponents(closeButton);
+
+                // 6. Send the message with button
+                await ticketChannel.send({ 
+                    content: `${rolePing} ${requesterPing} - A new logistics ticket has been opened for your request.`, 
+                    embeds: [embed],
+                    components: [buttonRow],
+                });
+
+                console.log(`✅ Successfully created ticket channel: ${safeChannelName}`);
+                return res.status(200).send('Ticket Created');
+
+            } catch (error) {
+                console.error("❌ Failed to create ticket channel in Discord:", error);
+                return res.status(500).send('Discord Error');
+            }
+        } else {
+            console.error("❌ Guild or Category ID not found! Check your .env file.");
+            return res.status(500).send('Config Error');
+        }
+    } else {
+        console.warn("⚠️ Webhook received, but no 'record' object was found in the body.");
+        return res.status(400).send('No record found');
+    }
+});
+
+// ==============================================================================
+// === BOT LOGIN AND SERVER START ===
+// ==============================================================================
+
+client.once(Events.ClientReady, c => {
+    console.log(`Logged in as ${c.user.tag}`);
+});
+
+// Log the bot into Discord
 client.login(process.env.DISCORD_TOKEN);
+
+// Start the Express server on Port 8080
+app.listen(8080, '0.0.0.0', () => {
+    console.log('🎧 Webhook server is listening on port 8080');
+});

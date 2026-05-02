@@ -1,6 +1,7 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const {
   ActionRowBuilder,
   AttachmentBuilder,
@@ -11,21 +12,174 @@ const {
 } = require('discord.js');
 
 let CachedResvg = null;
-let resvgLoadAttempted = false;
+
+function getDeclaredResvgVersion() {
+  try {
+    const manifest = require('./package.json');
+    const spec = String(manifest?.dependencies?.['@resvg/resvg-js'] || '').trim();
+    const match = spec.match(/\d+\.\d+\.\d+/);
+    return match ? match[0] : '2.6.2';
+  } catch {
+    return '2.6.2';
+  }
+}
+
+function isMuslRuntime() {
+  if (process.platform !== 'linux') return false;
+
+  try {
+    return !process.report?.getReport?.().header?.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
+function getExpectedResvgNativePackage() {
+  if (process.platform === 'win32') {
+    if (process.arch === 'x64') return '@resvg/resvg-js-win32-x64-msvc';
+    if (process.arch === 'ia32') return '@resvg/resvg-js-win32-ia32-msvc';
+    if (process.arch === 'arm64') return '@resvg/resvg-js-win32-arm64-msvc';
+    return null;
+  }
+
+  if (process.platform === 'linux') {
+    if (process.arch === 'x64') {
+      return isMuslRuntime() ? '@resvg/resvg-js-linux-x64-musl' : '@resvg/resvg-js-linux-x64-gnu';
+    }
+
+    if (process.arch === 'arm64') {
+      return isMuslRuntime() ? '@resvg/resvg-js-linux-arm64-musl' : '@resvg/resvg-js-linux-arm64-gnu';
+    }
+
+    if (process.arch === 'arm') return '@resvg/resvg-js-linux-arm-gnueabihf';
+    return null;
+  }
+
+  if (process.platform === 'darwin') {
+    if (process.arch === 'x64') return '@resvg/resvg-js-darwin-x64';
+    if (process.arch === 'arm64') return '@resvg/resvg-js-darwin-arm64';
+    return null;
+  }
+
+  if (process.platform === 'android') {
+    if (process.arch === 'arm64') return '@resvg/resvg-js-android-arm64';
+    if (process.arch === 'arm') return '@resvg/resvg-js-android-arm-eabi';
+  }
+
+  return null;
+}
+
+function canResolvePackage(packageName, baseDir) {
+  try {
+    require.resolve(`${packageName}/package.json`, {
+      paths: [baseDir],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureResvgDependenciesInstalled(baseDir = __dirname) {
+  const projectDir = path.resolve(baseDir);
+  const version = getDeclaredResvgVersion();
+  const nativePackage = getExpectedResvgNativePackage();
+  const missingPackages = [];
+
+  if (!canResolvePackage('@resvg/resvg-js', projectDir)) {
+    missingPackages.push(`@resvg/resvg-js@${version}`);
+  }
+
+  if (nativePackage && !canResolvePackage(nativePackage, projectDir)) {
+    missingPackages.push(`${nativePackage}@${version}`);
+  }
+
+  if (!missingPackages.length) {
+    return {
+      installed: false,
+      projectDir,
+      packages: [],
+      nativePackage,
+      version,
+    };
+  }
+
+  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const args = ['install', '--no-save', '--no-package-lock', ...missingPackages];
+  const result = spawnSync(npmCommand, args, {
+    cwd: projectDir,
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+
+  if (result.error || result.status !== 0) {
+    const error = result.error || new Error(`npm exited with status ${result.status || 1}.`);
+    error.command = `${npmCommand} ${args.join(' ')}`;
+    error.stdout = result.stdout || '';
+    error.stderr = result.stderr || '';
+    throw error;
+  }
+
+  return {
+    installed: true,
+    projectDir,
+    packages: missingPackages,
+    nativePackage,
+    version,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
+}
 
 function getResvgConstructor() {
   if (CachedResvg) return CachedResvg;
-  if (resvgLoadAttempted) return null;
-
-  resvgLoadAttempted = true;
 
   try {
-    ({ Resvg: CachedResvg } = require('@resvg/resvg-js'));
+    const installResult = ensureResvgDependenciesInstalled(__dirname);
+    if (installResult.installed) {
+      console.log(`Installed missing SVG renderer packages: ${installResult.packages.join(', ')}`);
+    }
+
+    const resvgPath = require.resolve('@resvg/resvg-js');
+    ({ Resvg: CachedResvg } = require(resvgPath));
+
+    if (typeof CachedResvg !== 'function') {
+      throw new TypeError('@resvg/resvg-js did not export a Resvg constructor.');
+    }
+
     return CachedResvg;
   } catch (error) {
-    console.warn('Stats image renderer unavailable, falling back to standard embeds:', error.message);
-    return null;
+    const resvgVersion = getDeclaredResvgVersion();
+    const expectedNativePackage = getExpectedResvgNativePackage();
+    const message = [
+      'Stats image renderer failed to load @resvg/resvg-js.',
+      `Bot directory: ${__dirname}`,
+      `Process cwd: ${process.cwd()}`,
+      `Node version: ${process.version}`,
+      `Platform: ${process.platform}/${process.arch}`,
+      `Expected native package: ${expectedNativePackage || 'unknown'}`,
+      `Module search paths: ${module.paths.join(', ')}`,
+      `Install command attempted: npm install --no-save --no-package-lock @resvg/resvg-js@${resvgVersion}${expectedNativePackage ? ` ${expectedNativePackage}@${resvgVersion}` : ''}`,
+      error.command ? `Installer command: ${error.command}` : null,
+      error.stderr ? `Installer stderr: ${error.stderr}` : null,
+      `Original error: ${error.message}`,
+    ].filter(Boolean).join(' ');
+    const wrappedError = new Error(message);
+    wrappedError.cause = error;
+    throw wrappedError;
   }
+}
+
+function assertStatsImageRenderer() {
+  const ResvgConstructor = getResvgConstructor();
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' height='10' fill='red'/></svg>";
+  const png = new ResvgConstructor(svg).render().asPng();
+
+  if (!png || !png.length) {
+    throw new Error('Stats image renderer self-test produced an empty PNG.');
+  }
+
+  return png.length;
 }
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
@@ -83,7 +237,7 @@ function escapeSvg(value) {
 function truncateLabel(value, maxLength = 24) {
   const text = String(value || '').trim();
   if (!text) return 'Unknown';
-  return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 3))}...` : text;
+  return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 6))}...` : text;
 }
 
 function truncateToWidth(value, maxWidth, fontSize = 16, minChars = 6) {
@@ -2295,7 +2449,6 @@ class StatsTracker {
 
   renderSvgAttachment(svg, name) {
     const ResvgConstructor = getResvgConstructor();
-    if (!ResvgConstructor) return null;
 
     const resvg = new ResvgConstructor(svg, {
       fitTo: { mode: 'width', value: PANEL_RENDER_WIDTH },
@@ -2308,51 +2461,24 @@ class StatsTracker {
     return new AttachmentBuilder(resvg.render().asPng(), { name });
   }
 
-  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer, fallbackPayload }) {
-    try {
-      const attachment = this.renderSvgAttachment(svg, attachmentName);
-      if (!attachment) {
-        return typeof fallbackPayload === 'function'
-          ? fallbackPayload()
-          : {
-              embeds: [
-                new EmbedBuilder()
-                  .setColor(0x2b2d31)
-                  .setTitle(title || 'Stats')
-                  .setDescription('Rendered stats cards are unavailable right now.'),
-              ],
-              components,
-              attachments: [],
-              ...(typeof content === 'string' ? { content } : {}),
-            };
-      }
+  buildImagePanelResponse({ title, svg, attachmentName, components, content, footer }) {
+    void title;
+    void footer;
 
-      const embed = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setImage(`attachment://${attachmentName}`);
+    const attachment = this.renderSvgAttachment(svg, attachmentName);
+    const embed = new EmbedBuilder()
+      .setColor(0x2b2d31)
+      .setImage(`attachment://${attachmentName}`);
 
-      const payload = {
-        embeds: [embed],
-        components,
-        files: [attachment],
-        attachments: [],
-      };
+    const payload = {
+      embeds: [embed],
+      components,
+      files: [attachment],
+      attachments: [],
+    };
 
-      if (typeof content === 'string') payload.content = content;
-      return payload;
-    } catch (error) {
-      console.error('Failed to render stats card:', error);
-      if (typeof fallbackPayload === 'function') return fallbackPayload();
-
-      const fallback = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setTitle(title || 'Stats')
-        .setDescription('The stats card could not be rendered right now.');
-
-      const payload = { embeds: [fallback], components, attachments: [] };
-      if (typeof content === 'string') payload.content = content;
-      return payload;
-    }
+    if (typeof content === 'string') payload.content = content;
+    return payload;
   }
 
   formatTopValue(row, category) {
@@ -3226,4 +3352,5 @@ class StatsTracker {
 
 module.exports = {
   StatsTracker,
+  assertStatsImageRenderer,
 };

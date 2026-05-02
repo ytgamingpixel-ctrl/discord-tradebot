@@ -1,10 +1,80 @@
-require('dotenv').config();
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+require('dotenv').config({ quiet: true });
+const { ChannelType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const commands = [
   new SlashCommandBuilder()
     .setName('ping')
     .setDescription('Test if the bot is alive')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('promote')
+    .setDescription('Promote a member, update roles, and post a promotion announcement')
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('Member to promote')
+        .setRequired(true)
+    )
+    .addRoleOption(option =>
+      option
+        .setName('rank_role')
+        .setDescription('Main rank role to assign')
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('extra_roles')
+        .setDescription('Optional extra roles to add, separated by commas or role mentions')
+        .setRequired(false)
+        .setMaxLength(500)
+    )
+    .addStringOption(option =>
+      option
+        .setName('remove_roles')
+        .setDescription('Optional roles to remove, separated by commas or role mentions')
+        .setRequired(false)
+        .setMaxLength(500)
+    )
+    .addStringOption(option =>
+      option
+        .setName('custom_message')
+        .setDescription('Optional text to add to the announcement')
+        .setRequired(false)
+        .setMaxLength(1200)
+    )
+    .addChannelOption(option =>
+      option
+        .setName('channel')
+        .setDescription('Announcement channel, defaults to the configured promotions channel')
+        .setRequired(false)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('citizen')
+    .setDescription('Look up a public Star Citizen citizen dossier')
+    .addStringOption(option =>
+      option
+        .setName('username')
+        .setDescription('Star Citizen handle')
+        .setRequired(false)
+        .setMaxLength(80)
+    )
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('Discord user with a linked RSI handle')
+        .setRequired(false)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('me')
+    .setDescription('Show your internal organisation profile')
     .toJSON(),
 
   new SlashCommandBuilder()

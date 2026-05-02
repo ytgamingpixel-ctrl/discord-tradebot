@@ -3,6 +3,10 @@
   "version": "1.4.17",
   "main": "index.js",
   "scripts": {
+    "postinstall": "node -e \"const { assertStatsImageRenderer } = require('./tracker'); console.log('SVG renderer ready (' + assertStatsImageRenderer() + ' byte test PNG).');\"",
+    "prestart": "node -e \"const { assertStatsImageRenderer } = require('./tracker'); console.log('SVG renderer ready (' + assertStatsImageRenderer() + ' byte test PNG).');\"",
+    "start": "node index.js",
+    "verify:resvg": "node -e \"const { assertStatsImageRenderer } = require('./tracker'); console.log('SVG renderer ready (' + assertStatsImageRenderer() + ' byte test PNG).');\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,6 +16,7 @@
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "discord.js": "^14.26.2",
-    "dotenv": "^17.4.0"
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1"
   }
 }

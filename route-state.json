@@ -1,11 +1,11 @@
 {
-  "049076a4d1f920c2": {
-    "shipName": "C1 Spirit",
+  "de61de7b6611541d": {
+    "shipName": "Hull C",
     "cargo": null,
-    "budget": 532944,
-    "location": "Everus Harbor",
+    "budget": 2032544,
+    "location": null,
     "finish": null,
-    "previousSignature": "Titanium|Everus Harbor — Stanton|Starlight Service Station — Pyro|Commodity Shop - Admin - Everus Harbor|Commodity Shop - Admin - Starlight Service|64",
-    "createdAt": 1775317664568
+    "previousSignature": "Medical Supplies|Rayari Anvik Research Outpost — Stanton|Rayari Deltana Research Outpost — Stanton|Commodity Shop - Rayari Anvik Research Outpost|Commodity Shop - Rayari Deltana Research Outpost|608",
+    "createdAt": 1777397829802
   }
 }

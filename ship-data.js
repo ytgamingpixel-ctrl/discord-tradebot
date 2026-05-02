@@ -100,6 +100,7 @@ const SHIP_ALIASES = {
 
 const SHIP_STATS_URL = 'https://starcitizen.tools/Ship_cargo_stats';
 const CACHE_MS = 24 * 60 * 60 * 1000;
+const SHIP_FETCH_TIMEOUT_MS = 8000;
 const MILITARY_SHIP_NAMES = new Set([
   'a2 hercules starlifter',
   'avenger titan',
@@ -115,6 +116,7 @@ const state = {
   lastUpdated: 0,
   sourceLabel: 'bundled fallback data',
 };
+let refreshPromise = null;
 
 function normalizeText(value) {
   return String(value || '').trim().toLowerCase();
@@ -138,9 +140,19 @@ function isMilitaryShipName(name) {
 }
 
 async function fetchLatestShipData() {
-  const response = await fetch(SHIP_STATS_URL, {
-    headers: { 'User-Agent': 'SPACEWHLE Trade Command Bot' },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SHIP_FETCH_TIMEOUT_MS);
+  let response;
+
+  try {
+    response = await fetch(SHIP_STATS_URL, {
+      headers: { 'User-Agent': 'SPACEWHLE Trade Command Bot' },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
   if (!response.ok) throw new Error(`Ship stats fetch failed with HTTP ${response.status}`);
   const html = await response.text();
 
@@ -186,17 +198,25 @@ async function ensureShipData(force = false) {
     return state.shipData;
   }
 
-  try {
-    await fetchLatestShipData();
-  } catch (error) {
-    console.error('Live ship data refresh failed, using fallback data:', error.message);
-    if (!state.lastUpdated) {
-      state.lastUpdated = Date.now();
-      state.sourceLabel = 'bundled fallback data';
-    }
-  }
+  if (!force && refreshPromise) return refreshPromise;
 
-  return state.shipData;
+  refreshPromise = (async () => {
+    try {
+      await fetchLatestShipData();
+    } catch (error) {
+      console.error('Live ship data refresh failed, using fallback data:', error.message);
+      if (!state.lastUpdated) {
+        state.lastUpdated = Date.now();
+        state.sourceLabel = 'bundled fallback data';
+      }
+    } finally {
+      refreshPromise = null;
+    }
+
+    return state.shipData;
+  })();
+
+  return refreshPromise;
 }
 
 function normalizeShipName(input) {
