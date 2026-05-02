@@ -17,6 +17,7 @@ const {
   ButtonStyle,
   ActionRowBuilder,
   ChannelType,
+  PermissionFlagsBits,
 } = require('discord.js');
 
 // ... (Keep all your existing StatsTracker, ship-data imports, and client setup right below this!) ...
@@ -3303,7 +3304,7 @@ async function closeLogisticsTicket(interaction, channel) {
     const member = await interaction.guild.members.fetch(interaction.user.id);
     
     if (!canCloseLogisticsTicket(member)) {
-      await interaction.reply({
+      await interaction.followUp({
         content: 'You do not have permission to close this logistics ticket.',
         ephemeral: true,
       });
@@ -3334,7 +3335,7 @@ async function closeLogisticsTicket(interaction, channel) {
     }
 
     // Delete the channel
-    await interaction.reply({
+    await interaction.followUp({
       content: 'Closing this logistics ticket...',
       ephemeral: true,
     });
