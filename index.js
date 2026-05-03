@@ -3473,7 +3473,7 @@ app.get('/member-stats/:discordId', (req, res) => {
     }
 
     // 2. Connect to the Database
-    const dbPath = './live_voice_tracker.db';
+    const dbPath = '/home/ubuntu/db-exports/live_voice_tracker.db';
     const db = new sqlite3.Database(dbPath);
     
     // 3. Search the 'roster' table using the Discord Name
@@ -3495,7 +3495,7 @@ app.get('/member-stats/:discordId', (req, res) => {
                 medical: row.division_medical || '',
                 logistics: row.division_logistics || '',
                 operations: row.division_operations || '',
-                academy: row.division_academy || ''
+                academy: row.division_academic || ''
             };
         } else if (err) {
             console.error("DB Error querying roster:", err.message);
