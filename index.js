@@ -3354,42 +3354,6 @@ async function closeLogisticsTicket(interaction, channel) {
   }
 }
 
-// This tells the bot how to respond when the website asks for stats
-app.get('/supabase-webhook/:discordId', (req, res) => {
-    const discordId = req.params.discordId;
-    
-    // Path to your database file on this server
-    const dbPath = './live_voice_tracker.db'; 
-    const db = new sqlite3.Database(dbPath);
-
-    // Query the database for this specific user's stats
-    const query = `SELECT messages, voice_seconds, sc_seconds, operations FROM user_stats WHERE user_id = ?`;
-
-    db.get(query, [discordId], (err, row) => {
-        db.close();
-        if (err) {
-            console.error("DB Error:", err.message);
-            return res.status(500).json({ error: "Database error" });
-        }
-        
-        if (!row) {
-            // If the user isn't in the DB yet, return 0s so the website doesn't crash
-            return res.json({ found: false, totals: { operations: 0 } });
-        }
-
-        // Send the data back to the website
-        res.json({
-            found: true,
-            totals: {
-                messages: row.messages || 0,
-                voiceSeconds: row.voice_seconds || 0,
-                starCitizenSeconds: row.sc_seconds || 0,
-                operations: row.operations || 0 // This number drives your Rank Tracker
-            }
-        });
-    });
-});
-
 
 // ==============================================================================
 // === EXPRESS WEB SERVER FOR SUPABASE WEBHOOKS (LOGISTICS TICKET SYSTEM) ===
@@ -3493,52 +3457,59 @@ app.post('/supabase-webhook', async (req, res) => {
 // === MEMBER STATS API (Combines JSON Tracker + SQLite DB) ===
 // ==============================================================================
 
-app.get('/supabase-webhook/:discordId', (req, res) => {
-    // Allow the website to read this data
-    res.setHeader('Access-Control-Allow-Origin', 'https://join.spacewhle.org');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
-
+// This tells the bot how to respond when the website asks for stats
+app.get('/member-stats/:discordId', (req, res) => {
     const discordId = req.params.discordId;
+    
+    // NEW: Capture the username sent by the website to search the 'roster' table
+    const discordName = req.query.username || ''; 
 
-    // 1. Get the data from your existing stats-state.json (via tracker.js)
+    // 1. Get Voice & Message stats from the JSON Tracker
     let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
     try {
-        const stats = tracker.getUserStats(discordId, 30); // Grabs 30 days of data
-        if (stats && stats.totals) {
-            jsonStats.messages = stats.totals.messages || 0;
-            jsonStats.voiceSeconds = stats.totals.voiceSeconds || 0;
-            jsonStats.starCitizenSeconds = stats.totals.starCitizenSeconds || 0;
-        }
+        jsonStats = tracker.getUserStats(discordId, 30);
     } catch (error) {
-        console.error('Tracker read error:', error);
+        console.error("Tracker read error:", error);
     }
 
-    // 2. Get the "Operations" from the live_voice_tracker.db
+    // 2. Connect to the Database
     const dbPath = './live_voice_tracker.db';
     const db = new sqlite3.Database(dbPath);
     
-    // IMPORTANT: Make sure 'user_stats' is the correct table name we found earlier
-    const query = `SELECT operations FROM user_stats WHERE user_id = ?`;
+    // 3. Search the 'roster' table using the Discord Name
+    const query = `SELECT * FROM roster WHERE discord_name = ? COLLATE NOCASE`;
 
-    db.get(query, [discordId], (err, row) => {
+    db.get(query, [discordName], (err, row) => {
         db.close();
         
-        let opsCount = 0;
+        let rosterData = null;
+
+        // If we found the user in the roster table, package their info!
         if (!err && row) {
-            opsCount = row.operations || 0;
+            rosterData = {
+                rank: row.rank || 'Unknown',
+                region: row.region || 'Unknown',
+                events: row.participation_events || 0,
+                soma: row.participation_soma || 0,
+                orders: row.participation_orders || 0,
+                medical: row.division_medical || '',
+                logistics: row.division_logistics || '',
+                operations: row.division_operations || '',
+                academy: row.division_academy || ''
+            };
         } else if (err) {
-            console.error("DB Error:", err.message);
+            console.error("DB Error querying roster:", err.message);
         }
 
-        // 3. Send the COMBINED data back to the website
+        // 4. Send the COMBINED data back to the website
         return res.json({
             found: true,
             totals: {
                 messages: jsonStats.messages,
                 voiceSeconds: jsonStats.voiceSeconds,
-                starCitizenSeconds: jsonStats.starCitizenSeconds,
-                operations: opsCount // Feeds the Rank Tracker
-            }
+                starCitizenSeconds: jsonStats.starCitizenSeconds
+            },
+            roster: rosterData
         });
     });
 });

@@ -15,6 +15,7 @@
   "description": "",
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",
+    "cors": "^2.8.6",
     "discord.js": "^14.26.2",
     "dotenv": "^17.4.0",
     "express": "^5.2.1",

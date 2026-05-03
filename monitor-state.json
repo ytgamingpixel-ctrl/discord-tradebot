@@ -1,10 +1,10 @@
 {
   "running": true,
   "cleanShutdown": false,
-  "lastHeartbeat": 1777808556802,
-  "lastBootAt": 1777807841612,
-  "lastShutdownAt": 1777808338864,
-  "lastShutdownReason": "SIGINT",
+  "lastHeartbeat": 1777814741603,
+  "lastBootAt": 1777814321595,
+  "lastShutdownAt": null,
+  "lastShutdownReason": null,
   "lastCrashCode": null,
   "lastCrashSource": null,
   "guildId": "1308340574457303042"
