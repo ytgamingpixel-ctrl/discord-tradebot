@@ -3463,12 +3463,13 @@ app.get('/member-stats/:discordId', async (req, res) => {
     const discordName = req.query.username || '';
 
     // 1. Get Voice & Message stats from the JSON Tracker
-    let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
-    try {
-        jsonStats = tracker.getUserStats(discordId, 30);
-    } catch (error) {
-        console.error("Tracker read error:", error);
-    }
+   let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
+try {
+    const result = tracker.getUserStats(discordId, 30);
+    jsonStats = result.totals || jsonStats;
+} catch (error) {
+    console.error("Tracker read error:", error);
+}
 
     // 2. Fetch roster data from the Django API
     let rosterData = null;
