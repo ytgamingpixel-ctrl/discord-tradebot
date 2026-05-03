@@ -2,7 +2,9 @@ require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const sqlite3 = require('sqlite3').verbose();
 const express = require('express');
+const voiceSessions = new Map();
 const app = express(); 
 const PORT = process.env.PORT || 8080;
 app.use(express.json());
@@ -3249,7 +3251,7 @@ client.on(Events.InteractionCreate, async interaction => {
       console.error('Reply error:', replyError);
     }
   }
-});
+ });
 // ==============================================================================
 // === LOGISTICS TICKET FUNCTIONS ===
 // ==============================================================================
@@ -3352,6 +3354,43 @@ async function closeLogisticsTicket(interaction, channel) {
   }
 }
 
+// This tells the bot how to respond when the website asks for stats
+app.get('/supabase-webhook/:discordId', (req, res) => {
+    const discordId = req.params.discordId;
+    
+    // Path to your database file on this server
+    const dbPath = './live_voice_tracker.db'; 
+    const db = new sqlite3.Database(dbPath);
+
+    // Query the database for this specific user's stats
+    const query = `SELECT messages, voice_seconds, sc_seconds, operations FROM user_stats WHERE user_id = ?`;
+
+    db.get(query, [discordId], (err, row) => {
+        db.close();
+        if (err) {
+            console.error("DB Error:", err.message);
+            return res.status(500).json({ error: "Database error" });
+        }
+        
+        if (!row) {
+            // If the user isn't in the DB yet, return 0s so the website doesn't crash
+            return res.json({ found: false, totals: { operations: 0 } });
+        }
+
+        // Send the data back to the website
+        res.json({
+            found: true,
+            totals: {
+                messages: row.messages || 0,
+                voiceSeconds: row.voice_seconds || 0,
+                starCitizenSeconds: row.sc_seconds || 0,
+                operations: row.operations || 0 // This number drives your Rank Tracker
+            }
+        });
+    });
+});
+
+
 // ==============================================================================
 // === EXPRESS WEB SERVER FOR SUPABASE WEBHOOKS (LOGISTICS TICKET SYSTEM) ===
 // ==============================================================================
@@ -3364,6 +3403,12 @@ app.post('/supabase-webhook', async (req, res) => {
     console.log("📩 NEW WEBHOOK RECEIVED");
     console.log("Headers:", req.headers);
     console.log("Body:", JSON.stringify(req.body, null, 2));
+
+// ADD THIS SAFETY CHECK:
+    if (!req.body || !req.body.record) {
+        console.warn("⚠️ Ignored invalid webhook payload.");
+        return res.status(400).send("Invalid payload");
+     }
 
     // --- SECURITY CHECK ---
     // Make sure the request is actually coming from Supabase
@@ -3442,6 +3487,60 @@ app.post('/supabase-webhook', async (req, res) => {
         console.warn("⚠️ Webhook received, but no 'record' object was found in the body.");
         return res.status(400).send('No record found');
     }
+   });
+
+// ==============================================================================
+// === MEMBER STATS API (Combines JSON Tracker + SQLite DB) ===
+// ==============================================================================
+
+app.get('/supabase-webhook/:discordId', (req, res) => {
+    // Allow the website to read this data
+    res.setHeader('Access-Control-Allow-Origin', 'https://join.spacewhle.org');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
+
+    const discordId = req.params.discordId;
+
+    // 1. Get the data from your existing stats-state.json (via tracker.js)
+    let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
+    try {
+        const stats = tracker.getUserStats(discordId, 30); // Grabs 30 days of data
+        if (stats && stats.totals) {
+            jsonStats.messages = stats.totals.messages || 0;
+            jsonStats.voiceSeconds = stats.totals.voiceSeconds || 0;
+            jsonStats.starCitizenSeconds = stats.totals.starCitizenSeconds || 0;
+        }
+    } catch (error) {
+        console.error('Tracker read error:', error);
+    }
+
+    // 2. Get the "Operations" from the live_voice_tracker.db
+    const dbPath = './live_voice_tracker.db';
+    const db = new sqlite3.Database(dbPath);
+    
+    // IMPORTANT: Make sure 'user_stats' is the correct table name we found earlier
+    const query = `SELECT operations FROM user_stats WHERE user_id = ?`;
+
+    db.get(query, [discordId], (err, row) => {
+        db.close();
+        
+        let opsCount = 0;
+        if (!err && row) {
+            opsCount = row.operations || 0;
+        } else if (err) {
+            console.error("DB Error:", err.message);
+        }
+
+        // 3. Send the COMBINED data back to the website
+        return res.json({
+            found: true,
+            totals: {
+                messages: jsonStats.messages,
+                voiceSeconds: jsonStats.voiceSeconds,
+                starCitizenSeconds: jsonStats.starCitizenSeconds,
+                operations: opsCount // Feeds the Rank Tracker
+            }
+        });
+    });
 });
 
 // ==============================================================================
