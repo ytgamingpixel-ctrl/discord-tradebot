@@ -3458,11 +3458,9 @@ app.post('/supabase-webhook', async (req, res) => {
 // ==============================================================================
 
 // This tells the bot how to respond when the website asks for stats
-app.get('/member-stats/:discordId', (req, res) => {
+app.get('/member-stats/:discordId', async (req, res) => {
     const discordId = req.params.discordId;
-    
-    // NEW: Capture the username sent by the website to search the 'roster' table
-    const discordName = req.query.username || ''; 
+    const discordName = req.query.username || '';
 
     // 1. Get Voice & Message stats from the JSON Tracker
     let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
@@ -3472,45 +3470,32 @@ app.get('/member-stats/:discordId', (req, res) => {
         console.error("Tracker read error:", error);
     }
 
-    // 2. Connect to the Database
-    const dbPath = '/home/ubuntu/db-exports/live_voice_tracker.db';
-    const db = new sqlite3.Database(dbPath);
-    
-    // 3. Search the 'roster' table using the Discord Name
-    const query = `SELECT * FROM roster WHERE discord_name = ? COLLATE NOCASE`;
-
-    db.get(query, [discordName], (err, row) => {
-        db.close();
-        
-        let rosterData = null;
-
-        // If we found the user in the roster table, package their info!
-        if (!err && row) {
-            rosterData = {
-                rank: row.rank || 'Unknown',
-                region: row.region || 'Unknown',
-                events: row.participation_events || 0,
-                soma: row.participation_soma || 0,
-                orders: row.participation_orders || 0,
-                medical: row.division_medical || '',
-                logistics: row.division_logistics || '',
-                operations: row.division_operations || '',
-                academy: row.division_academic || ''
-            };
-        } else if (err) {
-            console.error("DB Error querying roster:", err.message);
+    // 2. Fetch roster data from the Django API
+    let rosterData = null;
+    if (discordName) {
+        try {
+            const rosterRes = await fetch(`https://api.spacewhle.org/api/roster/${encodeURIComponent(discordName)}`);
+            if (rosterRes.ok) {
+                const rosterJson = await rosterRes.json();
+                if (rosterJson.found) {
+                    rosterData = rosterJson;
+                    delete rosterData.found;
+                }
+            }
+        } catch (error) {
+            console.error("Roster fetch error:", error);
         }
+    }
 
-        // 4. Send the COMBINED data back to the website
-        return res.json({
-            found: true,
-            totals: {
-                messages: jsonStats.messages,
-                voiceSeconds: jsonStats.voiceSeconds,
-                starCitizenSeconds: jsonStats.starCitizenSeconds
-            },
-            roster: rosterData
-        });
+    // 3. Send combined data back to the website
+    return res.json({
+        found: true,
+        totals: {
+            messages: jsonStats.messages,
+            voiceSeconds: jsonStats.voiceSeconds,
+            starCitizenSeconds: jsonStats.starCitizenSeconds
+        },
+        roster: rosterData
     });
 });
 
