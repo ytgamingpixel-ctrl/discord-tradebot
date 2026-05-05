@@ -2,7 +2,9 @@ require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const sqlite3 = require('sqlite3').verbose();
 const express = require('express');
+const voiceSessions = new Map();
 const app = express(); 
 const PORT = process.env.PORT || 8080;
 app.use(express.json());
@@ -3249,7 +3251,7 @@ client.on(Events.InteractionCreate, async interaction => {
       console.error('Reply error:', replyError);
     }
   }
-});
+ });
 // ==============================================================================
 // === LOGISTICS TICKET FUNCTIONS ===
 // ==============================================================================
@@ -3352,6 +3354,7 @@ async function closeLogisticsTicket(interaction, channel) {
   }
 }
 
+
 // ==============================================================================
 // === EXPRESS WEB SERVER FOR SUPABASE WEBHOOKS (LOGISTICS TICKET SYSTEM) ===
 // ==============================================================================
@@ -3364,6 +3367,12 @@ app.post('/supabase-webhook', async (req, res) => {
     console.log("📩 NEW WEBHOOK RECEIVED");
     console.log("Headers:", req.headers);
     console.log("Body:", JSON.stringify(req.body, null, 2));
+
+// ADD THIS SAFETY CHECK:
+    if (!req.body || !req.body.record) {
+        console.warn("⚠️ Ignored invalid webhook payload.");
+        return res.status(400).send("Invalid payload");
+     }
 
     // --- SECURITY CHECK ---
     // Make sure the request is actually coming from Supabase
@@ -3441,6 +3450,89 @@ app.post('/supabase-webhook', async (req, res) => {
     } else {
         console.warn("⚠️ Webhook received, but no 'record' object was found in the body.");
         return res.status(400).send('No record found');
+    }
+   });
+
+// ==============================================================================
+// === MEMBER STATS API (Combines JSON Tracker + SQLite DB) ===
+// ==============================================================================
+
+// This tells the bot how to respond when the website asks for stats
+app.get('/member-stats/:discordId', async (req, res) => {
+    const discordId = req.params.discordId;
+    const discordName = req.query.username || '';
+
+    // 1. Get Voice & Message stats from the JSON Tracker
+   let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
+try {
+    const result = tracker.getUserStats(discordId, 30);
+    jsonStats = result.totals || jsonStats;
+} catch (error) {
+    console.error("Tracker read error:", error);
+}
+
+    // 2. Fetch roster data from the Django API
+    let rosterData = null;
+    if (discordName) {
+        try {
+            const rosterRes = await fetch(`https://api.spacewhle.org/api/roster/${encodeURIComponent(discordName)}`);
+            if (rosterRes.ok) {
+                const rosterJson = await rosterRes.json();
+                if (rosterJson.found) {
+                    rosterData = rosterJson;
+                    delete rosterData.found;
+                }
+            }
+        } catch (error) {
+            console.error("Roster fetch error:", error);
+        }
+    }
+
+    // 3. Send combined data back to the website
+    return res.json({
+        found: true,
+        totals: {
+            messages: jsonStats.messages,
+            voiceSeconds: jsonStats.voiceSeconds,
+            starCitizenSeconds: jsonStats.starCitizenSeconds
+        },
+        roster: rosterData
+    });
+});
+
+// ==============================================================================
+// === PUBLIC API: DISCORD SCHEDULED EVENTS ===
+// ==============================================================================
+
+app.get('/events', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    try {
+        const SPACEWHLE_GUILD_ID = '1308340574457303042';
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'Bot not in guild yet' });
+
+        const scheduledEvents = await guild.scheduledEvents.fetch();
+        const now = Date.now();
+
+        const events = scheduledEvents
+            .filter(e => (e.status === 1 || e.status === 2) &&
+                         e.scheduledStartTimestamp >= now)
+            .sort((a, b) => a.scheduledStartTimestamp - b.scheduledStartTimestamp)
+            .map(e => ({
+                id:                   e.id,
+                name:                 e.name,
+                description:          e.description || '',
+                scheduled_start_time: e.scheduledStartAt?.toISOString(),
+                entity_type:          e.entityType,
+                entity_metadata:      e.entityMetadata,
+                status:               e.status,
+                user_count:           e.userCount ?? 0
+            }));
+
+        res.json(events);
+    } catch (err) {
+        console.error('GET /events error:', err);
+        res.status(500).json({ error: 'Failed to fetch events' });
     }
 });
 
