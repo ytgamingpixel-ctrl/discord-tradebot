@@ -3547,25 +3547,48 @@ app.get('/events', async (req, res) => {
 // === PUBLIC API: ACTIVITY LEADERBOARD ===
 // ==============================================================================
 
-app.get('/leaderboard', (req, res) => {
+app.get('/leaderboard', async (req, res) => {
     try {
         const days = parseInt(req.query.days) || 30;
         const board = tracker.getLeaderboard(days);
-        const rows = (board.all || [])
-            .map(u => ({
-                discord_id:    u.userId,
-                display_name:  u.username,
-                messages:      u.messages || 0,
-                voice_hours:   Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
-                sc_hours:      Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
-                // Scoring: messages ×2, voice mins ×3, SC mins ×1
-                // (events ×100 added client-side from Supabase RSVP data)
-                score: ((u.messages || 0) * 2)
-                     + (Math.round((u.voiceSeconds || 0) / 60) * 3)
-                     + Math.round((u.starCitizenSeconds || 0) / 60)
-            }))
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 20);
+        const trackerRows = (board.all || []).slice(0, 30); // cap at 30 to limit roster calls
+
+        // Fetch roster data for each user to get their all-time events count.
+        // Done in parallel batches of 5 to avoid hammering the roster API.
+        const BATCH = 5;
+        const enriched = [];
+        for (let i = 0; i < trackerRows.length; i += BATCH) {
+            const batch = trackerRows.slice(i, i + BATCH);
+            const results = await Promise.all(batch.map(async u => {
+                let eventsAttended = 0;
+                try {
+                    const r = await fetch(`https://api.spacewhle.org/api/roster/${encodeURIComponent(u.username)}`);
+                    if (r.ok) {
+                        const data = await r.json();
+                        if (data.found) eventsAttended = (data.events || 0) + (data.soma || 0) + (data.orders || 0);
+                    }
+                } catch { /* roster lookup failed for this user — skip */ }
+                return { ...u, eventsAttended };
+            }));
+            enriched.push(...results);
+        }
+
+        const rows = enriched.map(u => ({
+            discord_id:      u.userId,
+            display_name:    u.username,
+            messages:        u.messages || 0,
+            voice_hours:     Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
+            sc_hours:        Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
+            events_attended: u.eventsAttended,
+            // Scoring: events ×100, messages ×2, voice mins ×3, SC mins ×1
+            score: (u.eventsAttended * 100)
+                 + ((u.messages || 0) * 2)
+                 + (Math.round((u.voiceSeconds || 0) / 60) * 3)
+                 + Math.round((u.starCitizenSeconds || 0) / 60)
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 20);
+
         res.json(rows);
     } catch (err) {
         console.error('GET /leaderboard error:', err);
