@@ -3580,11 +3580,11 @@ app.get('/leaderboard', async (req, res) => {
             voice_hours:     Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
             sc_hours:        Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
             events_attended: u.eventsAttended,
-            // Scoring: events ×100, messages ×2, voice mins ×3, SC mins ×1
-            score: (u.eventsAttended * 100)
-                 + ((u.messages || 0) * 2)
-                 + (Math.round((u.voiceSeconds || 0) / 60) * 3)
-                 + Math.round((u.starCitizenSeconds || 0) / 60)
+            // Scoring: events ×10000, messages ×75, voice secs ×3, SC secs ×1
+            score: (u.eventsAttended * 10000)
+                 + ((u.messages || 0) * 75)
+                 + ((u.voiceSeconds || 0) * 3)
+                 + (u.starCitizenSeconds || 0)
         }))
         .sort((a, b) => b.score - a.score)
         .slice(0, 20);
