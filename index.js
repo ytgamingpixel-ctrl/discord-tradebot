@@ -3558,9 +3558,10 @@ app.get('/leaderboard', (req, res) => {
                 messages:      u.messages || 0,
                 voice_hours:   Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
                 sc_hours:      Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
-                // Composite score: messages + 1pt per minute of voice/SC
-                score: (u.messages || 0)
-                     + Math.round((u.voiceSeconds || 0) / 60)
+                // Scoring: messages ×2, voice mins ×3, SC mins ×1
+                // (events ×100 added client-side from Supabase RSVP data)
+                score: ((u.messages || 0) * 2)
+                     + (Math.round((u.voiceSeconds || 0) / 60) * 3)
                      + Math.round((u.starCitizenSeconds || 0) / 60)
             }))
             .sort((a, b) => b.score - a.score)
