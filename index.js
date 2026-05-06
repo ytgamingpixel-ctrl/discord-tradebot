@@ -3544,6 +3544,35 @@ app.get('/events', async (req, res) => {
 });
 
 // ==============================================================================
+// === PUBLIC API: ACTIVITY LEADERBOARD ===
+// ==============================================================================
+
+app.get('/leaderboard', (req, res) => {
+    try {
+        const days = parseInt(req.query.days) || 30;
+        const board = tracker.getLeaderboard(days);
+        const rows = (board.all || [])
+            .map(u => ({
+                discord_id:    u.userId,
+                display_name:  u.username,
+                messages:      u.messages || 0,
+                voice_hours:   Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
+                sc_hours:      Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
+                // Composite score: messages + 1pt per minute of voice/SC
+                score: (u.messages || 0)
+                     + Math.round((u.voiceSeconds || 0) / 60)
+                     + Math.round((u.starCitizenSeconds || 0) / 60)
+            }))
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 20);
+        res.json(rows);
+    } catch (err) {
+        console.error('GET /leaderboard error:', err);
+        res.status(500).json({ error: 'Failed to fetch leaderboard' });
+    }
+});
+
+// ==============================================================================
 // === BOT LOGIN AND SERVER START ===
 // ==============================================================================
 
