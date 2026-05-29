@@ -11,7 +11,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
@@ -27,6 +27,7 @@ const {
   ActionRowBuilder,
   ChannelType,
   PermissionFlagsBits,
+  Partials,
 } = require('discord.js');
 
 // ... (Keep all your existing StatsTracker, ship-data imports, and client setup right below this!) ...
@@ -44,9 +45,11 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
   ],
+  partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Channel],
 });
 
 const tracker = new StatsTracker(client);
@@ -66,7 +69,9 @@ const API_AUTH_HEADER = String(process.env.API_AUTH_HEADER || 'Authorization').t
 const API_AUTH_SCHEME = String(process.env.API_AUTH_SCHEME || 'Bearer').trim();
 const API_MEMBER_PROFILE_PATH = process.env.API_MEMBER_PROFILE_PATH || '/api/discord/{discordId}/profile';
 const API_RSI_LINK_PATH = process.env.API_RSI_LINK_PATH || '/api/discord/{discordId}/rsi';
-const PROMOTIONS_CHANNEL_ID = process.env.PROMOTIONS_CHANNEL_ID || null;
+// Hard-default to the SPACEWHLE promotions channel. The env var still
+// wins if set, so we can flip targets without redeploying.
+const PROMOTIONS_CHANNEL_ID = process.env.PROMOTIONS_CHANNEL_ID || '1308529431907663872';
 const PROMOTE_ALLOWED_ROLE_IDS = String(process.env.PROMOTE_ALLOWED_ROLE_IDS || '')
   .split(',')
   .map(value => value.trim())
@@ -1237,16 +1242,16 @@ function canRunPromotionCommand(member) {
 }
 
 async function resolvePromotionChannel(interaction, managerMember) {
-  const requestedChannel = interaction.options.getChannel('channel', false);
-  const channel = requestedChannel || (PROMOTIONS_CHANNEL_ID
+  // The `channel` option was removed — promotions always go to the
+  // configured PROMOTIONS_CHANNEL_ID (defaulted to the SPACEWHLE
+  // promotions channel at the top of this file).
+  const channel = PROMOTIONS_CHANNEL_ID
     ? await interaction.guild.channels.fetch(PROMOTIONS_CHANNEL_ID).catch(() => null)
-    : null);
+    : null;
 
   if (!channel) {
     return {
-      error: requestedChannel
-        ? 'I could not use that announcement channel.'
-        : 'No promotions channel is configured. Set `PROMOTIONS_CHANNEL_ID` or provide `channel`.',
+      error: 'No promotions channel is configured. Set `PROMOTIONS_CHANNEL_ID`.',
     };
   }
 
@@ -1262,18 +1267,123 @@ async function resolvePromotionChannel(interaction, managerMember) {
   return { channel };
 }
 
-function buildPromotionAnnouncement(targetMember, rankRole, addedRoles, customMessage) {
-  const rolesList = addedRoles
-    .map(role => `- ${escapeDiscordMarkdown(role.name)}`)
-    .join('\n');
-  const parts = [
-    '\u{1F389} **Promotion Announcement**',
-    `Congratulations to ${targetMember} on being promoted to **${escapeDiscordMarkdown(rankRole.name)}**.`,
-    `**Roles Received:**\n${rolesList}`,
-  ];
+// SPACEWHLE rank-name → AUEC promotion bonus. Keys are normalised by
+// lowercasing and stripping non-alphanumerics so "Wing Commander", "wg cdr"
+// and "WgCdr" all match the same entry.
+const PROMOTION_AUEC_BONUS = {
+    'major': '500k aUEC',                 'maj': '500k aUEC',
+    'captain': '400k aUEC',               'capt': '400k aUEC',
+    'wingcommander': '350k aUEC',         'wgcdr': '350k aUEC',
+    'lieutenant': '300k aUEC',            'lt': '300k aUEC',
+    'secondlieutenant': '275k aUEC',      '2lt': '275k aUEC',
+    'sergeantmajor': '250k aUEC',         'sm': '250k aUEC',
+    'mastersergeant': '200k aUEC',        'msg': '200k aUEC',
+    'staffsergeant': '150k aUEC',         'ssgt': '150k aUEC',
+    'sergeant': '125k aUEC',              'sgt': '125k aUEC'
+};
+function lookupPromotionBonus(rankName) {
+    if (!rankName) return null;
+    const key = String(rankName).toLowerCase().replace(/[^a-z0-9]/g, '');
+    return PROMOTION_AUEC_BONUS[key] || null;
+}
 
-  if (customMessage) parts.push(customMessage);
-  return parts.join('\n\n');
+function buildPromotionAnnouncement(targetMember, rankRole, addedRoles, customMessage) {
+    const userMention = targetMember && targetMember.toString ? targetMember.toString() : `<@${targetMember.id || targetMember}>`;
+    const rankMention = `<@&${rankRole.id}>`;
+    const lines = [
+        `Congratulations ${userMention} on their promotion 🎉`,
+        '',
+        `Promotion: ${rankMention}`
+    ];
+    const bonus = lookupPromotionBonus(rankRole.name);
+    if (bonus) {
+        lines.push('');
+        lines.push(`AUEC Bonus: ${bonus}`);
+    }
+    if (customMessage) {
+        lines.push('');
+        lines.push(customMessage);
+    }
+    return lines.join('\n');
+}
+
+// /promote-spacewhle — light-touch welcome flow:
+//   - Silently grants the base SPACEWHLE role (no ping for it).
+//   - Removes the three "applicant" / temporary roles if present.
+//   - Posts "Welcome to SPACEWHLE!" pinging the orientation role.
+// Only the `member` option is exposed; nothing else to configure.
+const SPW_BASE_ROLE_ID            = '1308522990119686284';
+const SPW_WELCOME_PING_ROLE_ID    = '1383554402182238208';
+const SPW_REMOVE_ROLE_IDS         = ['1354890945421774989', '1309576204751339635', '1308509770965323776'];
+
+async function handlePromoteSpacewhleCommand(interaction) {
+  // Already deferred by the dispatcher above.
+  if (!interaction.guild) {
+    await interaction.editReply('This command can only be run inside a server.');
+    return;
+  }
+  const target = interaction.options.getUser('member', true);
+  let targetMember;
+  try {
+    targetMember = await interaction.guild.members.fetch(target.id);
+  } catch {
+    await interaction.editReply('Could not find that member in this server.');
+    return;
+  }
+
+  const baseRole = interaction.guild.roles.cache.get(SPW_BASE_ROLE_ID);
+  if (!baseRole) {
+    await interaction.editReply('The SPACEWHLE base role is missing from this server.');
+    return;
+  }
+
+  // Add the SPACEWHLE role (silent — no ping for it).
+  try {
+    if (!targetMember.roles.cache.has(SPW_BASE_ROLE_ID)) {
+      await targetMember.roles.add(baseRole, `Welcomed into SPACEWHLE by ${interaction.user.tag}`);
+    }
+  } catch (e) {
+    await interaction.editReply(`Failed to add SPACEWHLE role: ${e.message}`);
+    return;
+  }
+
+  // Strip the temporary / applicant roles if present.
+  const toRemove = SPW_REMOVE_ROLE_IDS.filter(id => targetMember.roles.cache.has(id));
+  if (toRemove.length) {
+    try {
+      await targetMember.roles.remove(toRemove, 'Cleanup on SPACEWHLE welcome');
+    } catch (e) {
+      console.warn('promote-spacewhle remove-roles failed:', e.message);
+    }
+  }
+
+  // Post the welcome message into the same channel the command was run in.
+  // Format the user explicitly asked for:
+  //   Congratulations @user on their promotion 🎉
+  //   Promotion: @SPACEWHLE.
+  //   Welcome to SPACEWHLE!
+  // Ping only the promoted user — the SPACEWHLE role renders as a styled
+  // mention but does NOT ping everyone in it (allowedMentions.roles is empty).
+  const channel = interaction.channel;
+  if (channel && channel.isTextBased()) {
+    try {
+      const content = [
+        `Congratulations <@${target.id}> on their promotion 🎉`,
+        '',
+        `Promotion: <@&${SPW_BASE_ROLE_ID}>.`,
+        '',
+        `Welcome to SPACEWHLE!`
+      ].join('\n');
+      await channel.send({
+        content,
+        allowedMentions: { users: [target.id], roles: [] }
+      });
+    } catch (e) {
+      console.warn('promote-spacewhle channel send failed:', e.message);
+    }
+  }
+
+  await interaction.editReply(`✅ Welcomed <@${target.id}> into SPACEWHLE (added role, pinged welcome).`);
 }
 
 async function handlePromoteCommand(interaction) {
@@ -1373,7 +1483,7 @@ async function handlePromoteCommand(interaction) {
       content: announcement,
       allowedMentions: {
         users: [targetMember.id],
-        roles: [],
+        roles: [rankRole.id],
         repliedUser: false,
       },
     });
@@ -2791,6 +2901,16 @@ client.once(Events.ClientReady, async readyClient => {
   }
 
   await markStartupState();
+
+  // Seed VC-attendance presence from anyone already in the op channels, then
+  // kick off the first silent Discord-ID → roster attach scan.
+  try { _seedAttendancePresence(); } catch (e) { console.error('attendance seed error:', e); }
+  setTimeout(() => {
+    attachDiscordIdsToRoster()
+      .then(r => console.log('Discord-ID attach:', JSON.stringify(r)))
+      .catch(() => {});
+  }, 30 * 1000);
+
   console.log(`Logged in as ${readyClient.user.tag}`);
 });
 
@@ -2858,6 +2978,16 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton()) {
     const parts = interaction.customId.split(':');
 
+    if (parts[0] === 'rsvp') {
+      await handleRsvpButton(interaction, parts[1], parts[2]);
+      return;
+    }
+
+    if (parts[0] === 'evnotify') {
+      await handleEventNotifyButton(interaction, parts[1]);
+      return;
+    }
+
     try {
       await interaction.deferUpdate();
 
@@ -2912,10 +3042,15 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    await deferChatInputCommand(interaction);
+await deferChatInputCommand(interaction);
 
     if (interaction.commandName === 'promote') {
       await handlePromoteCommand(interaction);
+      return;
+    }
+
+    if (interaction.commandName === 'promote-spacewhle') {
+      await handlePromoteSpacewhleCommand(interaction);
       return;
     }
 
@@ -3190,6 +3325,21 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    if (interaction.commandName === 'event') {
+      await deferChatInputCommand(interaction);
+      const sub = interaction.options.getSubcommand(false);
+      if (sub === 'status') {
+        await interaction.editReply(buildEventStatusEmbed());
+      } else {
+        await interaction.editReply({
+          content: 'Use `/event status` to see live attendance tracking — who the bot is seeing and whether it is recording.',
+          embeds: [],
+          components: [],
+        });
+      }
+      return;
+    }
+
     if (interaction.commandName === 'ship') {
       await deferChatInputCommand(interaction);
       await ensureShipData(false);
@@ -3389,9 +3539,15 @@ app.post('/supabase-webhook', async (req, res) => {
        // return res.status(401).send('Unauthorized');
    // }
 
-    const order = req.body?.record; 
+    const order = req.body?.record;
 
     if (order) {
+        // Mirror the order into the bot's local store first, so members-area
+        // order history works despite Supabase RLS hiding the table from anon
+        // reads. Done before ticket creation so it's captured even if Discord
+        // channel creation later fails.
+        recordLogisticsOrderLocally(order);
+
         const guild = client.guilds.cache.get(process.env.GUILD_ID);
         const categoryId = process.env.LOGISTICS_CATEGORY_ID;
         
@@ -3469,14 +3625,19 @@ app.get('/member-stats/:discordId', async (req, res) => {
     const discordId = req.params.discordId;
     const discordName = req.query.username || '';
 
-    // 1. Get Voice & Message stats from the JSON Tracker
-   let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
-try {
-    const result = tracker.getUserStats(discordId, 30);
-    jsonStats = result.totals || jsonStats;
-} catch (error) {
-    console.error("Tracker read error:", error);
-}
+    // 1. Get Voice & Message stats from the JSON Tracker.
+    // The rank tracker card on members-area renders these values as the
+    // member's all-time stats — use a sentinel "9999 days" window which
+    // the tracker treats as effectively unbounded.
+    let jsonStats = { messages: 0, voiceSeconds: 0, starCitizenSeconds: 0 };
+    try {
+        // Totals-only — avoids building the 9999-element daily series this
+        // endpoint never uses (was ~1.9s of wasted work; now a few ms).
+        const totals = tracker.getUserTotals(discordId, 9999);
+        if (totals) jsonStats = totals;
+    } catch (error) {
+        console.error("Tracker read error:", error);
+    }
 
     // 2. Fetch roster data from the Django API
     let rosterData = null;
@@ -3551,43 +3712,73 @@ app.get('/leaderboard', async (req, res) => {
     try {
         const days = parseInt(req.query.days) || 30;
         const board = tracker.getLeaderboard(days);
-        const trackerRows = (board.all || []).slice(0, 30); // cap at 30 to limit roster calls
+        const allTrackerRows = board.all || [];
 
-        // Fetch roster data for each user to get their all-time events count.
-        // Done in parallel batches of 5 to avoid hammering the roster API.
-        const BATCH = 5;
-        const enriched = [];
-        for (let i = 0; i < trackerRows.length; i += BATCH) {
-            const batch = trackerRows.slice(i, i + BATCH);
-            const results = await Promise.all(batch.map(async u => {
-                let eventsAttended = 0;
-                try {
-                    const r = await fetch(`https://api.spacewhle.org/api/roster/${encodeURIComponent(u.username)}`);
-                    if (r.ok) {
-                        const data = await r.json();
-                        if (data.found) eventsAttended = (data.events || 0) + (data.soma || 0) + (data.orders || 0);
-                    }
-                } catch { /* roster lookup failed for this user — skip */ }
-                return { ...u, eventsAttended };
-            }));
-            enriched.push(...results);
+        // ── Robust enrichment for EVERY tracked member ──────────────────
+        // Two batch lookups instead of per-user API calls so the result is
+        // correct regardless of member count, with no premature slicing and
+        // no rate-limit risk:
+        //   1. Bulk-fetch the whole guild once → resolve userId →
+        //      { displayName, username } from cache. Fixes the case where
+        //      the tracker's stored display name ("Omoz_2021") doesn't match
+        //      the roster handle ("omoz_").
+        //   2. Pull the entire roster in one call → map handle → participation
+        //      counts (events + soma + orders).
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        // The bot keeps a warm member cache via the GuildMembers intent, so
+        // only pay for a full member fetch when the cache looks cold (e.g.
+        // right after a restart). A full fetch of ~140 members costs ~1–3s
+        // and was running on EVERY leaderboard call — now it's rare.
+        if (guild && guild.members.cache.size < (guild.memberCount || 0) * 0.5) {
+            try { await guild.members.fetch(); } catch (e) { console.warn('LB member fetch failed:', e.message); }
         }
 
-        const rows = enriched.map(u => ({
-            discord_id:      u.userId,
-            display_name:    u.username,
-            messages:        u.messages || 0,
-            voice_hours:     Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
-            sc_hours:        Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
-            events_attended: u.eventsAttended,
-            // Scoring: events ×10000, messages ×75, voice secs ×3, SC secs ×1
-            score: (u.eventsAttended * 10000)
-                 + ((u.messages || 0) * 75)
-                 + ((u.voiceSeconds || 0) * 3)
-                 + (u.starCitizenSeconds || 0)
-        }))
+        function identityFor(userId, fallbackName) {
+            const m = guild && userId ? guild.members.cache.get(userId) : null;
+            if (!m) return { displayName: fallbackName, username: (fallbackName || '').toLowerCase() };
+            return {
+                displayName: m.displayName || m.user?.globalName || m.user?.username || fallbackName,
+                username:    (m.user?.username || fallbackName || '').toLowerCase()
+            };
+        }
+
+        // Roster participation, keyed by lowercased discord handle.
+        const eventsByHandle = new Map();
+        try {
+            const rosterRes = await fetch('https://api.spacewhle.org/api/roster-list');
+            if (rosterRes.ok) {
+                const rosterJson = await rosterRes.json();
+                for (const m of (rosterJson.members || [])) {
+                    const key = String(m.discord_name || '').toLowerCase();
+                    if (key) eventsByHandle.set(key, (m.events || 0) + (m.soma || 0) + (m.orders || 0));
+                }
+            }
+        } catch (e) { console.warn('LB roster-list fetch failed:', e.message); }
+
+        const rows = allTrackerRows.map(u => {
+            const identity = identityFor(u.userId, u.username);
+            // Look up events by current username first, then the tracker
+            // name — both lowercased — covering renames + cache misses.
+            const eventsAttended =
+                eventsByHandle.get(identity.username)
+                ?? eventsByHandle.get(String(u.username || '').toLowerCase())
+                ?? 0;
+            return {
+                discord_id:      u.userId,
+                display_name:    identity.displayName || u.username,
+                messages:        u.messages || 0,
+                voice_hours:     Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
+                sc_hours:        Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
+                events_attended: eventsAttended,
+                // Scoring: events ×10000, messages ×250, voice secs ×8 (heavy), SC secs ×0.3 (low)
+                score: (eventsAttended * 10000)
+                     + ((u.messages || 0) * 250)
+                     + ((u.voiceSeconds || 0) * 8)
+                     + ((u.starCitizenSeconds || 0) * 0.3)
+            };
+        })
         .sort((a, b) => b.score - a.score)
-        .slice(0, 20);
+        .slice(0, 50); // frontend renders top 10 + (you ± 1); needs buffer
 
         res.json(rows);
     } catch (err) {
@@ -3595,6 +3786,2050 @@ app.get('/leaderboard', async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch leaderboard' });
     }
 });
+
+
+// ==============================================================================
+// === PUBLIC API: PAST DISCORD EVENTS (completed operations log) ===
+// ==============================================================================
+
+app.get("/events/past", async (req, res) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    try {
+        const SPACEWHLE_GUILD_ID = "1308340574457303042";
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: "Bot not in guild yet" });
+
+        const scheduledEvents = await guild.scheduledEvents.fetch();
+
+        const events = Array.from(scheduledEvents.values())
+            .filter(e => e.status === 3 || e.status === 4 ||
+                         (e.scheduledStartTimestamp && e.scheduledStartTimestamp < Date.now()))
+            .sort((a, b) => b.scheduledStartTimestamp - a.scheduledStartTimestamp)
+            .slice(0, 50)
+            .map(e => ({
+                id:                   e.id,
+                name:                 e.name,
+                description:          e.description || "",
+                scheduled_start_time: e.scheduledStartAt ? e.scheduledStartAt.toISOString() : null,
+                entity_type:          e.entityType,
+                status:               e.status
+            }));
+
+        res.json({ events });
+    } catch (err) {
+        console.error("GET /events/past error:", err);
+        res.status(500).json({ error: "Failed to fetch past events" });
+    }
+});
+
+
+// ==============================================================================
+// === ADMIN AUTH HELPER (verify Discord OAuth token) ===
+// ==============================================================================
+const SPACEWHLE_GUILD_ID = '1308340574457303042';
+const SUPABASE_URL = 'https://ybclydugcpwwrtfrodet.supabase.co';
+const ADMIN_USERNAMES = new Set(['ltz_solar', 'dro.p', 'omoz_', 'aidenatx', 'sukii']);
+const ADMIN_ROLE_IDS = new Set([
+    '1366876915083776060', // Lt Colonel
+    '1308509088807780382', // Colonel
+    '1308508914668535839', // Brigadier
+    '1354881826178469898', // Lieutenant General
+    '1308706708683493397', // General
+    '1308508590809813013', // Field Marshal
+]);
+
+// ──────────────────────────────────────────────────────────────────────
+// Public verification — frontend hits this so it doesn't have to call the
+// Discord OAuth API on every page load (provider_token expires within an
+// hour, which forces re-login). Bot uses its own bot token to check guild
+// membership / roles, so this works as long as the bot is alive.
+// ──────────────────────────────────────────────────────────────────────
+app.get('/verify/:discordId', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    try {
+        const discordId = String(req.params.discordId || '').trim();
+        if (!/^\d{10,25}$/.test(discordId)) {
+            return res.status(400).json({ error: 'invalid discordId' });
+        }
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'bot not in guild yet' });
+        // Cache-first: this is on the dashboard-reveal critical path. The
+        // member cache is kept warm by the GuildMembers intent, so a cache
+        // hit avoids a Discord REST round-trip (~150-300ms saved per load).
+        let member = guild.members.cache.get(discordId);
+        if (!member) {
+            try {
+                member = await guild.members.fetch(discordId);
+            } catch {
+                return res.json({ found: false, roles: [] });
+            }
+        }
+        const roles = [...member.roles.cache.keys()].filter(id => id !== SPACEWHLE_GUILD_ID);
+        res.json({
+            found: true,
+            user_id: member.id,
+            username: member.user.username,
+            display_name: member.displayName || member.user.globalName || member.user.username,
+            roles
+        });
+    } catch (err) {
+        console.error('GET /verify error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Roster vs Discord audit — for each member on the roster, check whether
+// they're in the Discord guild AND have the SPACEWHLE base role. Admin
+// only.
+app.get('/admin/roster-vs-discord', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'bot not in guild yet' });
+
+        // 1. Pull the public roster
+        const rosterRes = await fetch('https://api.spacewhle.org/api/admin/roster', {
+            headers: { Authorization: req.headers.authorization || '' }
+        });
+        if (!rosterRes.ok) {
+            return res.status(502).json({ error: 'roster fetch failed', status: rosterRes.status });
+        }
+        const roster = await rosterRes.json();
+        const members = roster.members || roster || [];
+
+        // 2. Fetch full guild member list (cached after first fetch)
+        await guild.members.fetch().catch(() => {});
+
+        const SPACEWHLE_ROLE_ID = '1308522990119686284';
+        const guildByUsername = new Map();
+        for (const m of guild.members.cache.values()) {
+            guildByUsername.set(m.user.username.toLowerCase(), m);
+        }
+
+        const missing = []; // not in guild at all
+        const noRole  = []; // in guild but lacks SPACEWHLE role
+        for (const r of members) {
+            const handle = String(r.discord || r.discord_name || '').toLowerCase().trim();
+            if (!handle) continue;
+            const m = guildByUsername.get(handle);
+            if (!m) { missing.push({ discord: handle, rsi: r.rsi_handle || '', rank: r.rank || '' }); continue; }
+            if (!m.roles.cache.has(SPACEWHLE_ROLE_ID)) {
+                noRole.push({ discord: handle, rsi: r.rsi_handle || '', rank: r.rank || '' });
+            }
+        }
+        res.json({
+            roster_count: members.length,
+            guild_count:  guild.members.cache.size,
+            missing,
+            no_role: noRole
+        });
+    } catch (err) {
+        console.error('GET /admin/roster-vs-discord error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+async function verifyAdmin(req) {
+    const auth = req.headers.authorization || '';
+    if (!auth.startsWith('Bearer ')) return null;
+    const token = auth.slice(7);
+
+    // Resolve the caller's Discord identity from the bearer token. TWO token
+    // types are accepted so admin web sessions survive long past the ~1h Discord
+    // OAuth token lifetime (the cause of the "logged out every hour" problem):
+    //   1. Discord OAuth access token (legacy `provider_token`)  -> /users/@me
+    //   2. Supabase access token (a JWT, auto-refreshed for days) -> /auth/v1/user,
+    //      whose user_metadata carries the Discord id as `provider_id`.
+    // A Supabase JWT has exactly two dots; a Discord token has none, so we probe
+    // the most likely source first and fall back to the other.
+    async function fromDiscord() {
+        try {
+            const r = await fetch('https://discord.com/api/v10/users/@me', {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (!r.ok) return null;
+            const d = await r.json();
+            return d.id ? { userId: d.id, username: (d.username || '').toLowerCase() } : null;
+        } catch (e) { return null; }
+    }
+    async function fromSupabase() {
+        try {
+            const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    apikey: process.env.SUPABASE_ANON_KEY || ''
+                }
+            });
+            if (!r.ok) return null;
+            const u = await r.json();
+            const meta = u.user_metadata || {};
+            const uid = meta.provider_id || meta.sub || null;
+            const uname = String(meta.user_name || meta.preferred_username || meta.name || meta.full_name || '').toLowerCase();
+            return uid ? { userId: uid, username: uname } : null;
+        } catch (e) { return null; }
+    }
+
+    const looksLikeJwt = (token.match(/\./g) || []).length === 2;
+    const ident = looksLikeJwt
+        ? (await fromSupabase()) || (await fromDiscord())
+        : (await fromDiscord()) || (await fromSupabase());
+    if (!ident || !ident.userId) return null;
+    const { userId, username } = ident;
+
+    try {
+        if (username && ADMIN_USERNAMES.has(username)) {
+            return { userId, username };
+        }
+        // Role check via the BOT's OWN token — reliable regardless of whether
+        // the user's OAuth token carries the guilds.members.read scope. Older
+        // authorizations don't have it (Discord won't re-prompt on re-login),
+        // which is why role-based admins were getting 403 / "session expired"
+        // while the username allowlist kept working.
+        try {
+            const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+            if (guild && userId) {
+                let member = guild.members.cache.get(userId);
+                if (!member) member = await guild.members.fetch(userId).catch(() => null);
+                if (member && [...ADMIN_ROLE_IDS].some(r => member.roles.cache.has(r))) {
+                    return { userId, username };
+                }
+            }
+        } catch (e) { /* fall through to the user-token fallback below */ }
+        // Fallback: original user-token guild lookup (Discord tokens only; a
+        // Supabase JWT won't authenticate against Discord, which is fine — the
+        // bot-token check above already covers the role lookup).
+        const guildRes = await fetch(`https://discord.com/api/v10/users/@me/guilds/${SPACEWHLE_GUILD_ID}/member`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        if (guildRes.ok) {
+            const guildData = await guildRes.json();
+            const roles = new Set(guildData.roles || []);
+            if ([...ADMIN_ROLE_IDS].some(r => roles.has(r))) {
+                return { userId, username };
+            }
+        }
+        return null;
+    } catch (e) {
+        console.error('verifyAdmin error:', e);
+        return null;
+    }
+}
+
+// ==============================================================================
+// === MEMBER DAILY STATS (for history chart) ===
+// ==============================================================================
+app.get('/member-stats/:discordId/daily', async (req, res) => {
+    const discordId = req.params.discordId;
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days) || 30));
+    try {
+        const stats = tracker.getUserStats(discordId, days);
+        if (!stats) return res.json({ found: false, daily: [] });
+        return res.json({
+            found: true,
+            days,
+            totals: stats.totals,
+            daily: stats.daily
+        });
+    } catch (err) {
+        console.error('GET /member-stats/:id/daily error:', err);
+        res.status(500).json({ error: 'Failed to fetch daily stats' });
+    }
+});
+
+// ==============================================================================
+// === ADMIN: GUILD INFO (channels, roles, emojis for event creator) ===
+// ==============================================================================
+app.get('/admin/guild-info', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'Bot not in guild' });
+
+        await guild.roles.fetch();
+        await guild.channels.fetch();
+        await guild.emojis.fetch();
+
+        // Restrict the channel list to the channels the calling admin
+        // can actually see in their client. Without this, announcement
+        // and event-creator dropdowns expose hidden channels (private
+        // staff threads, archived ops). Falls back to "no filter" when
+        // we can't resolve the calling admin's roles (rare).
+        let callerRoles = null;
+        try {
+            const callerMember = await guild.members.fetch(admin.userId).catch(() => null);
+            if (callerMember) callerRoles = callerMember;
+        } catch {}
+
+        const channels = guild.channels.cache
+            .filter(c => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement)
+            .filter(c => {
+                if (!callerRoles) return true; // can't check — let them through
+                const perms = c.permissionsFor(callerRoles);
+                return perms && perms.has(PermissionFlagsBits.ViewChannel);
+            })
+            .map(c => ({ id: c.id, name: c.name, parent: c.parent ? c.parent.name : null }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        const roles = guild.roles.cache
+            .filter(r => r.id !== guild.id)
+            .map(r => ({ id: r.id, name: r.name, color: r.hexColor, position: r.position }))
+            .sort((a, b) => b.position - a.position);
+
+        const emojis = guild.emojis.cache.map(e => ({
+            id: e.id,
+            name: e.name,
+            animated: e.animated,
+            url: e.imageURL(),
+            string: e.toString()
+        }));
+
+        res.json({ channels, roles, emojis });
+    } catch (err) {
+        console.error('GET /admin/guild-info error:', err);
+        res.status(500).json({ error: 'Failed to fetch guild info' });
+    }
+});
+
+// ==============================================================================
+// === ADMIN: ANNOUNCEMENT COMPOSER ===
+// ==============================================================================
+app.post('/admin/announce', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        const { channel_id, message, mention_role_ids, ping_everyone, ping_here } = req.body || {};
+        if (!channel_id || !message) return res.status(400).json({ error: 'channel_id and message required' });
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'Bot not in guild' });
+        const channel = guild.channels.cache.get(channel_id);
+        if (!channel || !channel.isTextBased()) return res.status(404).json({ error: 'Channel not found' });
+
+        const roleIds = Array.isArray(mention_role_ids) ? mention_role_ids : [];
+        const prefixParts = [];
+        if (ping_everyone) prefixParts.push('@everyone');
+        else if (ping_here) prefixParts.push('@here');
+        for (const id of roleIds) prefixParts.push(`<@&${id}>`);
+        const prefix = prefixParts.join(' ');
+        const content = prefix ? `${prefix}\n${message}` : message;
+
+        const allowedParse = [];
+        if (ping_everyone || ping_here) allowedParse.push('everyone');
+
+        const sent = await channel.send({
+            content,
+            allowedMentions: { parse: allowedParse, roles: roleIds }
+        });
+        console.log(`[announce] ${admin.username} sent ${sent.id} to #${channel.name} (everyone=${!!ping_everyone}, here=${!!ping_here}, roles=${roleIds.length})`);
+        res.json({ ok: true, message_id: sent.id });
+    } catch (err) {
+        console.error('POST /admin/announce error:', err);
+        res.status(500).json({ error: 'Failed to send announcement: ' + err.message });
+    }
+});
+
+// ==============================================================================
+// === REFERRAL PROCESSOR ===
+// ==============================================================================
+app.post('/admin/process-referrals', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        const supabaseAnon = process.env.SUPABASE_ANON_KEY || '';
+        if (!supabaseAnon) return res.status(500).json({ error: 'SUPABASE_ANON_KEY not configured' });
+
+        const refRes = await fetch(`${SUPABASE_URL}/rest/v1/referrals?bonus_awarded=eq.false&select=*`, {
+            headers: { apikey: supabaseAnon, Authorization: `Bearer ${supabaseAnon}` }
+        });
+        if (!refRes.ok) {
+            const txt = await refRes.text();
+            return res.status(500).json({ error: 'Supabase fetch failed: ' + txt });
+        }
+        const referrals = await refRes.json();
+        if (!referrals.length) return res.json({ ok: true, processed: 0, awarded: 0 });
+
+        let awarded = 0;
+        for (const ref of referrals) {
+            try {
+                const recruitName = ref.recruit_name;
+                if (!recruitName) continue;
+                const rosterRes = await fetch(`https://api.spacewhle.org/api/roster/${encodeURIComponent(recruitName)}/`);
+                if (!rosterRes.ok) continue;
+                const roster = await rosterRes.json();
+                if (!roster.found) continue;
+                const totalOps = (roster.events || 0) + (roster.soma || 0) + (roster.orders || 0);
+                if (totalOps < 1) continue;
+                const referrerName = ref.referrer_name;
+                if (!referrerName) continue;
+                const updateRes = await fetch('https://api.spacewhle.org/api/admin/update-member', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: req.headers.authorization
+                    },
+                    body: JSON.stringify({
+                        discord_name: referrerName,
+                        rsi_handle: '',
+                        rank: 'Op',
+                        division_operations: '',
+                        division_logistics: '',
+                        division_medical: '',
+                        division_academic: '',
+                        points_attendance: 1,
+                        points_soma: 0,
+                        points_orders: 0
+                    })
+                });
+                if (!updateRes.ok) {
+                    console.warn(`Failed to award ${referrerName}: ${await updateRes.text()}`);
+                    continue;
+                }
+                await fetch(`${SUPABASE_URL}/rest/v1/referrals?id=eq.${ref.id}`, {
+                    method: 'PATCH',
+                    headers: {
+                        apikey: supabaseAnon,
+                        Authorization: `Bearer ${supabaseAnon}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ bonus_awarded: true, bonus_awarded_at: new Date().toISOString() })
+                });
+                awarded++;
+            } catch (e) {
+                console.warn('Referral process error for one row:', e.message);
+            }
+        }
+        res.json({ ok: true, processed: referrals.length, awarded });
+    } catch (err) {
+        console.error('POST /admin/process-referrals error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ==============================================================================
+// === SESH-STYLE EVENT CREATOR ===
+// ==============================================================================
+const CUSTOM_EVENTS_FILE = path.join(__dirname, 'events_custom.json');
+
+function loadCustomEvents() {
+    try {
+        if (!fs.existsSync(CUSTOM_EVENTS_FILE)) return { events: [] };
+        return JSON.parse(fs.readFileSync(CUSTOM_EVENTS_FILE, 'utf8'));
+    } catch (e) {
+        console.error('loadCustomEvents error:', e);
+        return { events: [] };
+    }
+}
+
+function saveCustomEvents(data) {
+    try {
+        fs.writeFileSync(CUSTOM_EVENTS_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('saveCustomEvents error:', e);
+    }
+}
+
+// --- Local mirror of logistics orders -----------------------------------------
+// Supabase RLS hides logistics_orders from the anon role and the bot has no
+// service-role key, so it cannot read order history back out of Supabase. To
+// make the members-area "Order History" work anyway, every order that arrives
+// through the Supabase insert webhook is also appended to this local JSON store,
+// which /user/logistics-orders reads from (merged with Supabase if a
+// service-role key is ever configured).
+const LOGISTICS_ORDERS_FILE = path.join(__dirname, 'logistics_orders_local.json');
+const LOGISTICS_LOCAL_MAX = 5000;
+
+function loadLocalLogisticsOrders() {
+    try {
+        if (!fs.existsSync(LOGISTICS_ORDERS_FILE)) return { orders: [] };
+        const data = JSON.parse(fs.readFileSync(LOGISTICS_ORDERS_FILE, 'utf8'));
+        return data && Array.isArray(data.orders) ? data : { orders: [] };
+    } catch (e) {
+        console.error('loadLocalLogisticsOrders error:', e);
+        return { orders: [] };
+    }
+}
+
+function saveLocalLogisticsOrders(data) {
+    try {
+        fs.writeFileSync(LOGISTICS_ORDERS_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('saveLocalLogisticsOrders error:', e);
+    }
+}
+
+function recordLogisticsOrderLocally(order) {
+    try {
+        if (!order || !order.user_discord_id) return;
+        const data = loadLocalLogisticsOrders();
+        data.orders.push({
+            id: order.id != null ? order.id : null,
+            item: order.item || '',
+            quantity: order.quantity != null ? order.quantity : null,
+            location: order.location || '',
+            user_discord_id: String(order.user_discord_id),
+            created_at: order.created_at || new Date().toISOString()
+        });
+        // Keep the file bounded; newest entries stay at the end.
+        if (data.orders.length > LOGISTICS_LOCAL_MAX) {
+            data.orders = data.orders.slice(-LOGISTICS_LOCAL_MAX);
+        }
+        saveLocalLogisticsOrders(data);
+    } catch (e) {
+        console.error('recordLogisticsOrderLocally error:', e);
+    }
+}
+
+// ==============================================================================
+// === AUTOMATIC VOICE-CHANNEL EVENT ATTENDANCE ===
+// ------------------------------------------------------------------------------
+// While an event is live (start_time → end_time) the bot passively records how
+// long each member sits in any of the designated operation voice channels. A
+// member counts as "participating" if they were present for at least 70% of the
+// event window. Admins review + confirm participation from the admin page,
+// which awards event points to each participant on the roster.
+//
+// This is completely independent of tracker.js / stats-state.json and never
+// touches leaderboard scoring.
+// ==============================================================================
+const ATTENDANCE_FILE = path.join(__dirname, 'event_attendance.json');
+const ATTENDANCE_CHANNEL_IDS = new Set([
+    '1366419233319292958',
+    '1370728873377005591',
+    '1370728909271859340',
+    '1378349304640704532',
+    '1390697755898417245',
+    '1391148928438632630',
+    '1425211796175847575',
+]);
+const ATTENDANCE_THRESHOLD = 0.70; // ≥70% of the event window in VC = attended.
+const BOT_SHARED_SECRET = process.env.BOT_SHARED_SECRET || '';
+
+function loadAttendance() {
+    try {
+        if (!fs.existsSync(ATTENDANCE_FILE)) return { events: {} };
+        const d = JSON.parse(fs.readFileSync(ATTENDANCE_FILE, 'utf8'));
+        if (!d || typeof d !== 'object') return { events: {} };
+        if (!d.events || typeof d.events !== 'object') d.events = {};
+        return d;
+    } catch (e) {
+        console.error('loadAttendance error:', e);
+        return { events: {} };
+    }
+}
+function saveAttendance(data) {
+    try {
+        fs.writeFileSync(ATTENDANCE_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error('saveAttendance error:', e);
+    }
+}
+
+function _eventWindowMs(ev) {
+    const s = new Date(ev.start_time).getTime();
+    const e = ev.end_time
+        ? new Date(ev.end_time).getTime()
+        : s + (Number(ev.duration_minutes) || 60) * 60 * 1000;
+    return { s, e };
+}
+
+// userId -> { since: epoch-ms, username, display_name }
+const _attendPresence = new Map();
+
+// Roll the elapsed [since → now] window for every currently-present member into
+// any event whose window overlaps it, then advance each member's "since" cursor
+// to now. Overlap is clamped to each event window, so time spent before start
+// or after end is never counted.
+function _accrueAttendance(now = Date.now()) {
+    if (_attendPresence.size === 0) return;
+    let evData;
+    try { evData = loadCustomEvents(); } catch { evData = { events: [] }; }
+    const events = Array.isArray(evData.events) ? evData.events : [];
+    if (events.length === 0) {
+        // No events to accrue into — still advance cursors so idle time isn't
+        // retro-counted if an event later appears.
+        for (const p of _attendPresence.values()) p.since = now;
+        return;
+    }
+    const att = loadAttendance();
+    let dirty = false;
+    for (const [userId, p] of _attendPresence) {
+        const from = p.since;
+        if (now <= from) continue;
+        for (const ev of events) {
+            if (!ev || !ev.id || !ev.start_time) continue;
+            const { s, e } = _eventWindowMs(ev);
+            const ovStart = Math.max(from, s);
+            const ovEnd = Math.min(now, e);
+            const overlapSec = Math.floor((ovEnd - ovStart) / 1000);
+            if (overlapSec <= 0) continue;
+            let erec = att.events[ev.id];
+            if (!erec) {
+                erec = att.events[ev.id] = {
+                    title: ev.title || 'Operation',
+                    start_time: ev.start_time,
+                    end_time: new Date(e).toISOString(),
+                    duration_minutes: Number(ev.duration_minutes) || 60,
+                    channel_id: ev.channel_id || null,
+                    members: {},
+                    points_applied: false,
+                    applied_at: null,
+                    applied_points: 0
+                };
+            }
+            // Keep metadata fresh in case the event was edited after creation.
+            erec.title = ev.title || erec.title;
+            erec.start_time = ev.start_time;
+            erec.end_time = new Date(e).toISOString();
+            erec.duration_minutes = Number(ev.duration_minutes) || erec.duration_minutes || 60;
+            let mrec = erec.members[userId];
+            if (!mrec) mrec = erec.members[userId] = { username: p.username, display_name: p.display_name, seconds: 0 };
+            if (p.username) mrec.username = p.username;
+            if (p.display_name) mrec.display_name = p.display_name;
+            mrec.seconds = (mrec.seconds || 0) + overlapSec;
+            dirty = true;
+        }
+        p.since = now;
+    }
+    if (dirty) saveAttendance(att);
+}
+
+// Seed presence from whoever is already sitting in the tracked channels — e.g.
+// after a bot restart mid-event. Loses the pre-restart slice but keeps counting.
+function _seedAttendancePresence() {
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return;
+        const now = Date.now();
+        for (const chId of ATTENDANCE_CHANNEL_IDS) {
+            const ch = guild.channels.cache.get(chId);
+            if (!ch || !ch.members) continue;
+            for (const m of ch.members.values()) {
+                if (!m || m.user?.bot) continue;
+                _attendPresence.set(m.id, {
+                    since: now,
+                    username: m.user?.username || 'unknown',
+                    display_name: m.displayName || m.user?.globalName || m.user?.username || 'unknown'
+                });
+            }
+        }
+    } catch (e) {
+        console.error('_seedAttendancePresence error:', e);
+    }
+}
+
+// Entry/exit tracking for the designated voice channels. Multiple listeners for
+// the same gateway event are fine — tracker.js has its own, this is additive.
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+    try {
+        const member = newState.member || oldState.member;
+        if (!member || member.user?.bot) return;
+        const userId = member.id;
+        const oldCh = oldState.channelId || null;
+        const newCh = newState.channelId || null;
+        const isTracked = !!(newCh && ATTENDANCE_CHANNEL_IDS.has(newCh));
+        const wasTracked = !!(oldCh && ATTENDANCE_CHANNEL_IDS.has(oldCh));
+        if (!isTracked && !wasTracked) return; // churn in an untracked channel
+
+        // Close out everyone's elapsed time at the exact moment of transition.
+        _accrueAttendance(Date.now());
+
+        if (isTracked) {
+            const username = member.user?.username || 'unknown';
+            const display_name = member.displayName || member.user?.globalName || username;
+            const existing = _attendPresence.get(userId);
+            if (existing) {
+                existing.username = username;
+                existing.display_name = display_name;
+            } else {
+                _attendPresence.set(userId, { since: Date.now(), username, display_name });
+            }
+        } else {
+            _attendPresence.delete(userId);
+        }
+    } catch (e) {
+        console.error('attendance voiceStateUpdate error:', e);
+    }
+});
+
+// Periodic accrual so long uninterrupted sessions still get recorded, and an
+// event that ends mid-session captures its final slice.
+setInterval(() => { try { _accrueAttendance(); } catch (e) { console.error('attendance tick error:', e); } }, 30 * 1000);
+
+// Build an at-a-glance status of the live attendance tracker for `/event status`:
+// whether an event is being recorded right now, who the bot currently sees in the
+// operation voice channels, and per-member progress toward the attendance threshold.
+function buildEventStatusEmbed() {
+    const now = Date.now();
+    // Freshen accrued seconds right up to this moment so the report isn't up to 30s stale.
+    try { _accrueAttendance(now); } catch {}
+
+    let evData;
+    try { evData = loadCustomEvents(); } catch { evData = { events: [] }; }
+    const events = Array.isArray(evData.events) ? evData.events : [];
+
+    const live = [], upcoming = [];
+    for (const ev of events) {
+        if (!ev || !ev.start_time) continue;
+        const { s, e } = _eventWindowMs(ev);
+        if (now >= s && now < e) live.push({ ev, s, e });
+        else if (now < s) upcoming.push({ ev, s, e });
+    }
+    live.sort((a, b) => a.e - b.e);
+    upcoming.sort((a, b) => a.s - b.s);
+
+    const att = loadAttendance();
+    const watching = _attendPresence.size;
+    const thrPct = Math.round(ATTENDANCE_THRESHOLD * 100);
+
+    const fmtDur = (secs) => {
+        secs = Math.max(0, Math.floor(secs || 0));
+        const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+        if (h) return `${h}h ${m}m`;
+        if (m) return `${m}m ${s}s`;
+        return `${s}s`;
+    };
+
+    const embed = new EmbedBuilder()
+        .setColor(live.length ? 0x57f287 : 0x5865f2)
+        .setTitle('📡 Event Attendance — Status')
+        .setFooter({ text: `Threshold ${thrPct}% · ${ATTENDANCE_CHANNEL_IDS.size} operation channels watched · confirm & award points on the admin page` })
+        .setTimestamp(new Date());
+
+    if (live.length) {
+        embed.setDescription(`🔴 **Recording now** — ${live.length} live event${live.length > 1 ? 's' : ''}. Watching **${watching}** member${watching !== 1 ? 's' : ''} in the operation voice channels.`);
+    } else {
+        embed.setDescription(`⚪ **Idle** — no event is live right now, so nothing is being recorded. The bot is watching the operation voice channels and will start automatically when the next event's start time arrives.\nIn those channels right now: **${watching}** member${watching !== 1 ? 's' : ''}.`);
+    }
+
+    for (const { ev, s, e } of live.slice(0, 3)) {
+        const totalSec = Math.max(1, Math.floor((e - s) / 1000));
+        const remainMin = Math.max(0, Math.round((e - now) / 60000));
+        const rec = att.events[ev.id];
+        const members = rec && rec.members ? rec.members : {};
+        const rows = Object.values(members)
+            .sort((a, b) => (b.seconds || 0) - (a.seconds || 0))
+            .slice(0, 15)
+            .map(m => {
+                const pct = Math.min(100, Math.round((m.seconds || 0) / totalSec * 100));
+                const mark = pct >= thrPct ? '✅' : '⏳';
+                return `${mark} **${m.display_name || m.username || 'unknown'}** — ${fmtDur(m.seconds || 0)} · ${pct}%`;
+            });
+        const body = rows.length ? rows.join('\n') : '_No one recorded in the operation channels yet._';
+        embed.addFields({
+            name: `🔴 ${(ev.title || 'Operation').slice(0, 240)} — ${remainMin}m left`,
+            value: body.slice(0, 1024),
+        });
+    }
+
+    if (!live.length && watching) {
+        const names = [..._attendPresence.values()]
+            .map(p => `• ${p.display_name || p.username || 'unknown'}`)
+            .slice(0, 25);
+        embed.addFields({ name: '👀 In the operation channels now', value: names.join('\n').slice(0, 1024) });
+    }
+
+    if (upcoming.length) {
+        const { ev, s } = upcoming[0];
+        const unix = Math.floor(s / 1000);
+        embed.addFields({
+            name: '⏭️ Next event',
+            value: `**${(ev.title || 'Operation').slice(0, 240)}**\nStarts <t:${unix}:F> (<t:${unix}:R>)`,
+        });
+    } else if (!live.length) {
+        embed.addFields({ name: '⏭️ Next event', value: '_No upcoming events scheduled._' });
+    }
+
+    return { embeds: [embed] };
+}
+
+// ── Silently attach Discord IDs to roster members ────────────────────────────
+// Scans the guild, matches each roster discord_name to a live member's username,
+// and pushes {discord_name → discord_id} to Django. Server-to-server via a
+// shared secret so it can run unattended. Only writes the discord_id column.
+async function attachDiscordIdsToRoster() {
+    try {
+        if (!BOT_SHARED_SECRET) return { ok: false, error: 'BOT_SHARED_SECRET not set' };
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return { ok: false, error: 'bot not in guild' };
+        await guild.members.fetch().catch(() => {});
+        const byUsername = new Map();
+        for (const m of guild.members.cache.values()) {
+            if (m.user?.bot) continue;
+            byUsername.set(m.user.username.toLowerCase(), m.id);
+        }
+        const rRes = await fetch('https://api.spacewhle.org/api/roster-list');
+        if (!rRes.ok) return { ok: false, error: 'roster-list ' + rRes.status };
+        const rJson = await rRes.json();
+        const mappings = [];
+        for (const m of (rJson.members || [])) {
+            const name = String(m.discord_name || '').toLowerCase().trim();
+            if (!name) continue;
+            const id = byUsername.get(name);
+            if (id) mappings.push({ discord_name: m.discord_name, discord_id: id });
+        }
+        if (mappings.length === 0) return { ok: true, attached: 0, matched: 0 };
+        const sRes = await fetch('https://api.spacewhle.org/api/admin/attach-discord-ids', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Bot-Secret': BOT_SHARED_SECRET },
+            body: JSON.stringify({ mappings })
+        });
+        if (!sRes.ok) return { ok: false, error: 'attach ' + sRes.status };
+        const sJson = await sRes.json().catch(() => ({}));
+        return { ok: true, attached: sJson.updated ?? mappings.length, matched: mappings.length };
+    } catch (e) {
+        console.error('attachDiscordIdsToRoster error:', e);
+        return { ok: false, error: e.message };
+    }
+}
+// Re-scan a few times a day. The first run is kicked off from the ready handler.
+setInterval(() => { attachDiscordIdsToRoster().catch(() => {}); }, 6 * 60 * 60 * 1000);
+
+function buildEventEmbed(ev) {
+    const embed = new EmbedBuilder()
+        .setTitle(ev.title)
+        .setColor(0x2e8b57)
+        .setTimestamp(new Date(ev.start_time));
+
+    const startSec = Math.floor(new Date(ev.start_time).getTime() / 1000);
+    let desc = ev.description ? ev.description + '\n\n' : '';
+    desc += `🕒 **Starts:** <t:${startSec}:F>\n`;
+    desc += `<t:${startSec}:R>`;
+    const dur = Number(ev.duration_minutes);
+    if (Number.isFinite(dur) && dur > 0) {
+        const hours = Math.floor(dur / 60);
+        const mins = dur % 60;
+        const durLabel = hours && mins ? `${hours}h ${mins}m`
+                       : hours          ? `${hours}h`
+                       : `${mins}m`;
+        const endSec = startSec + dur * 60;
+        desc += `\n⏳ **Duration:** ${durLabel} (ends <t:${endSec}:t>)`;
+    }
+    if (ev.required_role_id) {
+        desc += `\n\n🔒 RSVP requires <@&${ev.required_role_id}>`;
+    }
+    embed.setDescription(desc);
+
+    let attendeeCount = 0;
+    for (const opt of (ev.rsvp_options || [])) {
+        const users = opt.users || [];
+        if (opt.counts_as_rsvp !== false) attendeeCount += users.length;
+        const max = Number.isFinite(opt.max_slots) && opt.max_slots > 0 ? opt.max_slots : null;
+        const countLabel = max ? `${users.length} / ${max}` : `${users.length}`;
+        const value = users.length ? users.map(uid => `<@${uid}>`).join('\n') : '-';
+        embed.addFields({
+            name: `${opt.emoji} ${opt.label} (${countLabel})`,
+            value: value.slice(0, 1024),
+            inline: true
+        });
+    }
+
+    if (ev.image_url) embed.setImage(ev.image_url);
+    embed.setFooter({ text: `Event ID: ${ev.id} • Total RSVPs: ${attendeeCount}` });
+    return embed;
+}
+
+function buildEventComponents(ev) {
+    const rows = [];
+    let current = new ActionRowBuilder();
+    let count = 0;
+    (ev.rsvp_options || []).forEach((opt, idx) => {
+        if (rows.length >= 5) return;
+        if (count === 5) {
+            rows.push(current);
+            current = new ActionRowBuilder();
+            count = 0;
+            if (rows.length >= 5) return;
+        }
+        const btn = new ButtonBuilder()
+            .setCustomId(`rsvp:${ev.id}:${idx}`)
+            .setLabel((opt.label || 'RSVP').slice(0, 80))
+            .setStyle(opt.counts_as_rsvp === false ? ButtonStyle.Danger : ButtonStyle.Secondary);
+        try {
+            const m = opt.emoji && opt.emoji.match(/<a?:([^:]+):(\d+)>/);
+            if (m) {
+                btn.setEmoji({ id: m[2], name: m[1], animated: opt.emoji.startsWith('<a:') });
+            } else if (opt.emoji) {
+                btn.setEmoji(opt.emoji);
+            }
+        } catch (e) { /* invalid emoji — skip */ }
+        current.addComponents(btn);
+        count++;
+    });
+    if (count > 0) rows.push(current);
+    if (rows.length < 5) {
+        rows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`evnotify:${ev.id}`)
+                .setLabel('Notify me 30m before')
+                .setEmoji('🔔')
+                .setStyle(ButtonStyle.Primary)
+        ));
+    }
+    return rows;
+}
+
+function emojiKey(emojiStr) {
+    const m = emojiStr && emojiStr.match(/<a?:[^:]+:(\d+)>/);
+    return m ? m[1] : emojiStr;
+}
+
+async function refreshEventMessage(ev) {
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return;
+        const channel = guild.channels.cache.get(ev.channel_id);
+        if (!channel) return;
+        const msg = await channel.messages.fetch(ev.message_id);
+        if (!msg) return;
+        await msg.edit({ embeds: [buildEventEmbed(ev)], components: buildEventComponents(ev) });
+    } catch (e) {
+        console.warn('refreshEventMessage failed:', e.message);
+    }
+}
+
+app.post('/admin/events/create', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        const {
+            title, description, image_url, start_time,
+            channel_id, ping_role_ids, required_role_id,
+            ping_everyone, ping_here,
+            rsvp_options, create_discord_event,
+            duration_minutes
+        } = req.body || {};
+
+        const durMin = Number(duration_minutes);
+        const safeDuration = Number.isFinite(durMin) && durMin >= 5 && durMin <= 24 * 60
+            ? Math.floor(durMin)
+            : 60;
+
+        if (!title || !start_time || !channel_id) {
+            return res.status(400).json({ error: 'title, start_time, channel_id required' });
+        }
+        if (!Array.isArray(rsvp_options) || rsvp_options.length === 0) {
+            return res.status(400).json({ error: 'At least one rsvp_option required' });
+        }
+
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'Bot not in guild' });
+        const channel = guild.channels.cache.get(channel_id);
+        if (!channel || !channel.isTextBased()) return res.status(404).json({ error: 'Channel not found' });
+
+        const eventId = crypto.randomUUID();
+        const ev = {
+            id: eventId,
+            discord_event_id: null,
+            channel_id,
+            message_id: null,
+            title,
+            description: description || '',
+            image_url: image_url || '',
+            start_time: new Date(start_time).toISOString(),
+            duration_minutes: safeDuration,
+            end_time: new Date(new Date(start_time).getTime() + safeDuration * 60 * 1000).toISOString(),
+            ping_role_ids: Array.isArray(ping_role_ids) ? ping_role_ids : [],
+            ping_everyone: !!ping_everyone,
+            ping_here:     !!ping_here,
+            required_role_id: required_role_id || null,
+            rsvp_options: rsvp_options.map(o => {
+                const maxRaw = Number(o.max_slots);
+                return {
+                    label: o.label || 'RSVP',
+                    emoji: o.emoji,
+                    emoji_key: emojiKey(o.emoji),
+                    required_role_id: o.required_role_id || null,
+                    counts_as_rsvp: o.counts_as_rsvp !== false,
+                    max_slots: Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : null,
+                    users: []
+                };
+            }),
+            ping_30m_sent: false,
+            ping_start_sent: false,
+            created_by: admin.userId,
+            created_at: new Date().toISOString()
+        };
+
+        if (create_discord_event) {
+            try {
+                const startDt = new Date(ev.start_time);
+                const endDt = new Date(startDt.getTime() + safeDuration * 60 * 1000);
+                // Discord caps: name 100 chars, description 1000 chars.
+                // Truncate so a long description (e.g. a full Stormbreaker
+                // template) doesn't break the scheduled-event creation.
+                const safeName = String(title || 'Operation').slice(0, 100);
+                const rawDesc  = String(description || '');
+                const safeDesc = rawDesc.length > 1000 ? rawDesc.slice(0, 997) + '…' : rawDesc;
+                const scheduled = await guild.scheduledEvents.create({
+                    name: safeName,
+                    scheduledStartTime: startDt,
+                    scheduledEndTime: endDt,
+                    privacyLevel: 2,
+                    entityType: 3,
+                    description: safeDesc,
+                    entityMetadata: { location: `#${channel.name}` },
+                    image: image_url || undefined
+                });
+                ev.discord_event_id = scheduled.id;
+            } catch (e) {
+                console.warn('Failed to create Discord scheduled event:', e.message);
+            }
+        }
+
+        const mParts = [];
+        if (ev.ping_everyone) mParts.push('@everyone');
+        else if (ev.ping_here) mParts.push('@here');
+        for (const id of (ev.ping_role_ids || [])) mParts.push(`<@&${id}>`);
+        const prefix = mParts.join(' ');
+        const allowedParseEmbed = (ev.ping_everyone || ev.ping_here) ? ['everyone'] : [];
+        const sent = await channel.send({
+            content: prefix || '',
+            embeds: [buildEventEmbed(ev)],
+            components: buildEventComponents(ev),
+            allowedMentions: { parse: allowedParseEmbed, roles: ev.ping_role_ids || [] }
+        });
+        ev.message_id = sent.id;
+
+        try {
+            const thread = await sent.startThread({
+                name: ev.title.slice(0, 100),
+                autoArchiveDuration: 1440
+            });
+            ev.thread_id = thread.id;
+        } catch (e) {
+            console.warn('Failed to start event thread:', e.message);
+        }
+
+        const data = loadCustomEvents();
+        data.events.push(ev);
+        saveCustomEvents(data);
+
+        res.json({ ok: true, event: ev });
+    } catch (err) {
+        console.error('POST /admin/events/create error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/admin/events/list', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    const data = loadCustomEvents();
+    const now = Date.now();
+    const future = data.events.filter(e => new Date(e.start_time).getTime() > now)
+        .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+    const past = data.events.filter(e => new Date(e.start_time).getTime() <= now)
+        .sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+    res.json({ upcoming: future, past: past.slice(0, 20) });
+});
+
+// Edit an existing event in place. Only mutable fields are accepted; the
+// event id, message id, thread id, discord_event_id, RSVP user lists, and
+// timestamps are preserved. The Discord message gets refreshed (embed +
+// buttons) on save, and if a Discord scheduled event was created for it,
+// that gets patched too.
+app.patch('/admin/events/:id', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    const data = loadCustomEvents();
+    const ev = data.events.find(e => e.id === req.params.id);
+    if (!ev) return res.status(404).json({ error: 'Not found' });
+
+    try {
+        const b = req.body || {};
+        if (typeof b.title === 'string')        ev.title = b.title.trim().slice(0, 200);
+        if (typeof b.description === 'string')  ev.description = b.description;
+        if (typeof b.image_url === 'string')    ev.image_url = b.image_url.trim();
+        if (typeof b.start_time === 'string')   ev.start_time = new Date(b.start_time).toISOString();
+        if ('required_role_id' in b)            ev.required_role_id = b.required_role_id || null;
+        if (Array.isArray(b.ping_role_ids))     ev.ping_role_ids = b.ping_role_ids;
+        if (typeof b.ping_everyone === 'boolean') ev.ping_everyone = b.ping_everyone;
+        if (typeof b.ping_here === 'boolean')   ev.ping_here = b.ping_here;
+        if (Number.isFinite(Number(b.duration_minutes))) {
+            const dm = Math.floor(Number(b.duration_minutes));
+            if (dm >= 5 && dm <= 24 * 60) {
+                ev.duration_minutes = dm;
+                ev.end_time = new Date(new Date(ev.start_time).getTime() + dm * 60 * 1000).toISOString();
+            }
+        }
+        if (Array.isArray(b.rsvp_options)) {
+            // Preserve existing users[] for options that map to a matching
+            // emoji (so editing doesn't drop everyone's RSVPs).
+            const oldByEmoji = new Map((ev.rsvp_options || []).map(o => [emojiKey(o.emoji), o.users || []]));
+            ev.rsvp_options = b.rsvp_options.map(o => {
+                const key = emojiKey(o.emoji);
+                const maxRaw = Number(o.max_slots);
+                return {
+                    label: o.label || 'RSVP',
+                    emoji: o.emoji,
+                    emoji_key: key,
+                    required_role_id: o.required_role_id || null,
+                    counts_as_rsvp: o.counts_as_rsvp !== false,
+                    max_slots: Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : null,
+                    users: oldByEmoji.get(key) || []
+                };
+            });
+        }
+        saveCustomEvents(data);
+
+        // Refresh the posted Discord message (embed + buttons).
+        try { await refreshEventMessage(ev); } catch (e) { console.warn('refresh after PATCH failed:', e.message); }
+
+        // Patch the Discord scheduled event if one was created.
+        if (ev.discord_event_id) {
+            try {
+                const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+                const sched = guild ? await guild.scheduledEvents.fetch(ev.discord_event_id).catch(() => null) : null;
+                if (sched) {
+                    const dur = Number(ev.duration_minutes) || 60;
+                    const startDt = new Date(ev.start_time);
+                    const endDt = new Date(startDt.getTime() + dur * 60 * 1000);
+                    const safeDesc = String(ev.description || '').slice(0, 1000);
+                    await sched.edit({
+                        name: String(ev.title || 'Operation').slice(0, 100),
+                        description: safeDesc,
+                        scheduledStartTime: startDt,
+                        scheduledEndTime: endDt,
+                        image: ev.image_url || undefined
+                    });
+                }
+            } catch (e) {
+                console.warn('Discord scheduled-event update failed:', e.message);
+            }
+        }
+
+        res.json({ ok: true, event: ev });
+    } catch (err) {
+        console.error('PATCH /admin/events/:id error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/admin/events/:id', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    const data = loadCustomEvents();
+    const ev = data.events.find(e => e.id === req.params.id);
+    if (!ev) return res.status(404).json({ error: 'Not found' });
+
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        const channel = guild?.channels.cache.get(ev.channel_id);
+        if (ev.thread_id && guild) {
+            const thread = await guild.channels.fetch(ev.thread_id).catch(() => null);
+            if (thread) await thread.delete().catch(() => {});
+        }
+        if (channel && ev.message_id) {
+            const msg = await channel.messages.fetch(ev.message_id).catch(() => null);
+            if (msg) await msg.delete().catch(() => {});
+        }
+        if (ev.discord_event_id && guild) {
+            await guild.scheduledEvents.delete(ev.discord_event_id).catch(() => {});
+        }
+    } catch (e) { console.warn('Cleanup error on delete:', e.message); }
+
+    data.events = data.events.filter(e => e.id !== req.params.id);
+    saveCustomEvents(data);
+    res.json({ ok: true });
+});
+
+// ==============================================================================
+// === EVENT ATTENDANCE — admin review + confirm ===
+// ==============================================================================
+
+// List recent / live events that have attendance data or have already ended,
+// each annotated with a participation summary. Powers the popup's event picker.
+app.get('/admin/events/attendance-pending', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        // Flush any in-flight presence so live events read fresh.
+        try { _accrueAttendance(); } catch {}
+        const evData = loadCustomEvents();
+        const att = loadAttendance();
+        const now = Date.now();
+        const out = [];
+        for (const ev of (evData.events || [])) {
+            if (!ev || !ev.id || !ev.start_time) continue;
+            const { s, e } = _eventWindowMs(ev);
+            const erec = att.events[ev.id];
+            const recordedCount = erec ? Object.keys(erec.members || {}).length : 0;
+            const started = now >= s;
+            const ended = now >= e;
+            // Surface anything that's started (live or ended). Skip future events.
+            if (!started) continue;
+            const durSec = Math.max(1, Math.floor((e - s) / 1000));
+            let participated = 0;
+            if (erec) {
+                for (const m of Object.values(erec.members || {})) {
+                    if (Math.min(m.seconds || 0, durSec) / durSec >= ATTENDANCE_THRESHOLD) participated++;
+                }
+            }
+            out.push({
+                id: ev.id,
+                title: ev.title,
+                start_time: ev.start_time,
+                end_time: new Date(e).toISOString(),
+                duration_minutes: Number(ev.duration_minutes) || Math.round(durSec / 60),
+                ended,
+                live: started && !ended,
+                recorded_count: recordedCount,
+                participated_count: participated,
+                points_applied: !!(erec && erec.points_applied),
+                applied_points: erec ? (erec.applied_points || 0) : 0,
+                applied_at: erec ? (erec.applied_at || null) : null
+            });
+        }
+        out.sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+        res.json({ events: out.slice(0, 30), threshold: ATTENDANCE_THRESHOLD });
+    } catch (err) {
+        console.error('GET /admin/events/attendance-pending error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Per-member attendance breakdown for one event, with roster-match resolution
+// so the UI can show who will actually receive points.
+app.get('/admin/events/:id/attendance', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        try { _accrueAttendance(); } catch {}
+        const evData = loadCustomEvents();
+        const ev = (evData.events || []).find(e => e.id === req.params.id);
+        const att = loadAttendance();
+        const erec = att.events[req.params.id];
+        // Fall back to stored attendance metadata if the event was deleted.
+        const meta = ev || (erec ? {
+            id: req.params.id, title: erec.title, start_time: erec.start_time,
+            end_time: erec.end_time, duration_minutes: erec.duration_minutes
+        } : null);
+        if (!meta) return res.status(404).json({ error: 'Event not found' });
+        const { s, e } = _eventWindowMs(meta);
+        const durSec = Math.max(1, Math.floor((e - s) / 1000));
+
+        // Resolve roster matches (Discord-ID first, then username).
+        const rosterById = new Map(), rosterByName = new Map();
+        try {
+            const rRes = await fetch('https://api.spacewhle.org/api/admin/roster', {
+                headers: { Authorization: req.headers.authorization || '' }
+            });
+            if (rRes.ok) {
+                const rJson = await rRes.json();
+                for (const m of (rJson.members || [])) {
+                    if (m.discord_id) rosterById.set(String(m.discord_id), m);
+                    if (m.discord) rosterByName.set(String(m.discord).toLowerCase(), m);
+                }
+            }
+        } catch (e2) { console.warn('attendance roster fetch failed:', e2.message); }
+
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        const members = [];
+        const recMembers = (erec && erec.members) ? erec.members : {};
+        for (const [userId, m] of Object.entries(recMembers)) {
+            const seconds = Math.min(m.seconds || 0, durSec);
+            const pct = seconds / durSec;
+            let username = m.username || '';
+            let display_name = m.display_name || username;
+            const gm = guild?.members.cache.get(userId);
+            if (gm) { username = gm.user.username; display_name = gm.displayName || gm.user.globalName || username; }
+            const rosterRow = rosterById.get(userId) || (username ? rosterByName.get(username.toLowerCase()) : null);
+            members.push({
+                user_id: userId,
+                username,
+                display_name,
+                seconds,
+                minutes: Math.round(seconds / 60),
+                pct: Math.round(pct * 1000) / 10,
+                participated: pct >= ATTENDANCE_THRESHOLD,
+                roster_match: rosterRow ? (rosterRow.discord || null) : null
+            });
+        }
+        members.sort((a, b) => b.seconds - a.seconds);
+        res.json({
+            event: {
+                id: meta.id || req.params.id,
+                title: meta.title,
+                start_time: meta.start_time,
+                end_time: new Date(e).toISOString(),
+                duration_minutes: Number(meta.duration_minutes) || Math.round(durSec / 60),
+                duration_seconds: durSec
+            },
+            threshold: ATTENDANCE_THRESHOLD,
+            threshold_pct: Math.round(ATTENDANCE_THRESHOLD * 100),
+            points_applied: !!(erec && erec.points_applied),
+            applied_points: erec ? (erec.applied_points || 0) : 0,
+            applied_at: erec ? (erec.applied_at || null) : null,
+            members
+        });
+    } catch (err) {
+        console.error('GET /admin/events/:id/attendance error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Confirm participation → award event points to each qualifying participant on
+// the roster (minus any manually excluded via the X button). Idempotent: once
+// applied, re-confirming is refused.
+app.post('/admin/events/:id/confirm-attendance', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    try {
+        const eventId = req.params.id;
+        const att = loadAttendance();
+        const erec = att.events[eventId];
+        if (!erec) return res.status(404).json({ error: 'No attendance recorded for this event' });
+        if (erec.points_applied) {
+            return res.status(409).json({ error: 'Points already applied for this event', already_applied: true, applied_at: erec.applied_at });
+        }
+        const exclude = new Set((Array.isArray(req.body?.exclude) ? req.body.exclude : []).map(String));
+        // Manual override: force-count these members even if they fell below
+        // the attendance threshold.
+        const include = new Set((Array.isArray(req.body?.include) ? req.body.include : []).map(String));
+        let points = Number(req.body?.points);
+        if (!Number.isFinite(points)) points = 1;
+        points = Math.max(0, Math.min(50, Math.floor(points)));
+
+        const { s, e } = _eventWindowMs({ start_time: erec.start_time, end_time: erec.end_time, duration_minutes: erec.duration_minutes });
+        // Optional actual finish time → recompute the attendance window so % is
+        // judged against how long the operation really ran, not the scheduled
+        // block. Ignored if it isn't a valid instant after the start.
+        let effEnd = e;
+        if (req.body?.end) {
+            const t = new Date(req.body.end).getTime();
+            if (Number.isFinite(t) && t > s) effEnd = t;
+        }
+        const durSec = Math.max(1, Math.floor((effEnd - s) / 1000));
+
+        const participants = [];
+        for (const [userId, m] of Object.entries(erec.members || {})) {
+            const uid = String(userId);
+            if (exclude.has(uid)) continue;
+            const pct = Math.min(m.seconds || 0, durSec) / durSec;
+            const qualifies = pct >= ATTENDANCE_THRESHOLD || include.has(uid);
+            if (qualifies) participants.push({ userId, username: m.username || '', display_name: m.display_name || '' });
+        }
+
+        // Pull roster once so we can preserve each row's other fields and match
+        // by Discord-ID first, username second.
+        const rosterById = new Map(), rosterByName = new Map();
+        try {
+            const rRes = await fetch('https://api.spacewhle.org/api/admin/roster', {
+                headers: { Authorization: req.headers.authorization || '' }
+            });
+            if (!rRes.ok) return res.status(502).json({ error: 'Roster fetch failed', status: rRes.status });
+            const rJson = await rRes.json();
+            for (const m of (rJson.members || [])) {
+                if (m.discord_id) rosterById.set(String(m.discord_id), m);
+                if (m.discord) rosterByName.set(String(m.discord).toLowerCase(), m);
+            }
+        } catch (e2) {
+            return res.status(502).json({ error: 'Roster fetch error: ' + e2.message });
+        }
+
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        const applied = [], skipped = [];
+        for (const p of participants) {
+            let username = p.username;
+            const gm = guild?.members.cache.get(p.userId);
+            if (gm) username = gm.user.username;
+            const row = rosterById.get(p.userId) || (username ? rosterByName.get(username.toLowerCase()) : null);
+            if (!row) {
+                skipped.push({ user_id: p.userId, username: username || p.display_name, reason: 'not on roster' });
+                continue;
+            }
+            if (points > 0) {
+                try {
+                    const upd = await fetch('https://api.spacewhle.org/api/admin/update-member', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: req.headers.authorization || '' },
+                        body: JSON.stringify({
+                            discord_name:        row.discord,
+                            rsi_handle:          row.rsi_handle || '',
+                            rank:                row.rank || 'SpW',
+                            division_operations: row.div_ops || '',
+                            division_logistics:  row.div_log || '',
+                            division_medical:    row.div_med || '',
+                            division_academic:   row.div_aca || '',
+                            points_attendance:   points,
+                            points_soma:         0,
+                            points_orders:       0
+                        })
+                    });
+                    if (!upd.ok) { skipped.push({ user_id: p.userId, username, reason: 'update failed (' + upd.status + ')' }); continue; }
+                } catch (e3) {
+                    skipped.push({ user_id: p.userId, username, reason: 'update error' });
+                    continue;
+                }
+            }
+            applied.push({ user_id: p.userId, username, discord_name: row.discord, points });
+        }
+
+        erec.points_applied = true;
+        erec.applied_at = new Date().toISOString();
+        erec.applied_points = points;
+        erec.applied_by = admin.username || admin.userId;
+        erec.applied_end = new Date(effEnd).toISOString();
+        if (include.size) erec.applied_overrides = [...include];
+        saveAttendance(att);
+
+        res.json({ ok: true, event_id: eventId, points, applied, skipped, participant_count: participants.length, finish_time: new Date(effEnd).toISOString() });
+    } catch (err) {
+        console.error('POST /admin/events/:id/confirm-attendance error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Manual trigger for the silent Discord-ID → roster attach scan (also runs
+// automatically on startup + every 6h).
+app.post('/admin/roster/attach-discord-ids', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+    const r = await attachDiscordIdsToRoster();
+    res.json(r);
+});
+
+// ==============================================================================
+// === BUTTON HANDLER for custom event RSVPs ===
+// ==============================================================================
+// In-memory locks keyed on (eventId|userId). A double-click on a button
+// can otherwise fire two parallel runs of the handler, both loading the
+// same JSON snapshot, both modifying it, both saving — the second write
+// clobbers the first. The lock serialises clicks per-user-per-event.
+const _rsvpLocks = new Map(); // key → Promise tail
+
+async function handleRsvpButton(interaction, eventId, idxStr) {
+    const userId = interaction.user.id;
+    const lockKey = `${eventId}|${userId}`;
+
+    // Acknowledge the click within 3s; we can edit the message after.
+    if (!interaction.replied && !interaction.deferred) {
+        try { await interaction.deferUpdate(); } catch { /* already acked */ }
+    }
+
+    // Serialise: queue this run after any previous in-flight click from
+    // the same user on the same event.
+    const tail = _rsvpLocks.get(lockKey) || Promise.resolve();
+    const run = tail.then(() => _processRsvpClick(interaction, eventId, idxStr)).catch(e => {
+        console.warn('RSVP click failed:', e.message);
+    });
+    _rsvpLocks.set(lockKey, run.then(() => {
+        // Clear the lock when this run is the last one queued.
+        if (_rsvpLocks.get(lockKey) === run) _rsvpLocks.delete(lockKey);
+    }));
+    await run;
+}
+
+async function _processRsvpClick(interaction, eventId, idxStr) {
+    const idx = parseInt(idxStr, 10);
+    const data = loadCustomEvents();
+    const ev = data.events.find(e => e.id === eventId);
+    if (!ev) {
+        return interaction.followUp({ content: '❌ This event no longer exists.', ephemeral: true }).catch(() => {});
+    }
+    const opt = (ev.rsvp_options || [])[idx];
+    if (!opt) {
+        return interaction.followUp({ content: '❌ That RSVP option no longer exists.', ephemeral: true }).catch(() => {});
+    }
+
+    const userId = interaction.user.id;
+    let memberRoles = new Set();
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        const member = await guild.members.fetch(userId);
+        memberRoles = new Set(member.roles.cache.map(r => r.id));
+    } catch (e) { /* user not in guild */ }
+
+    if (ev.required_role_id && !memberRoles.has(ev.required_role_id)) {
+        return interaction.followUp({ content: `❌ This event requires the <@&${ev.required_role_id}> role.`, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
+    }
+    if (opt.required_role_id && !memberRoles.has(opt.required_role_id)) {
+        return interaction.followUp({ content: `❌ This option requires the <@&${opt.required_role_id}> role.`, ephemeral: true, allowedMentions: { parse: [] } }).catch(() => {});
+    }
+
+    const wasIn = (opt.users || []).includes(userId);
+    let action;
+    if (wasIn) {
+        opt.users = opt.users.filter(uid => uid !== userId);
+        action = 'removed';
+    } else {
+        const max = Number.isFinite(opt.max_slots) && opt.max_slots > 0 ? opt.max_slots : null;
+        if (max && (opt.users || []).length >= max) {
+            return interaction.followUp({ content: `❌ **${opt.label}** is full (${max} slots).`, ephemeral: true }).catch(() => {});
+        }
+        for (const other of ev.rsvp_options) {
+            if (other !== opt) {
+                other.users = (other.users || []).filter(uid => uid !== userId);
+            }
+        }
+        if (!opt.users) opt.users = [];
+        opt.users.push(userId);
+        action = 'added';
+    }
+
+    saveCustomEvents(data);
+
+    // Already deferred (deferUpdate) by handleRsvpButton; edit the message
+    // in place. interaction.update isn't valid post-defer.
+    try {
+        await interaction.editReply({ embeds: [buildEventEmbed(ev)], components: buildEventComponents(ev) });
+    } catch (e) {
+        console.warn('RSVP editReply failed; falling back to message edit:', e.message);
+        refreshEventMessage(ev);
+    }
+
+    // Only DM about "you have RSVPed" when the option actually counts as
+    // an RSVP. Two safety nets: the explicit counts_as_rsvp flag (new
+    // events) AND a label sniff (Unavailable / Declined / Not going / etc.)
+    // for any older event where the flag wasn't set. If either check says
+    // "this is a non-RSVP option", suppress the DM.
+    const NON_RSVP_LABEL_RE = /^(unavailable|declin|not\s*going|can'?t\s*(make|go|attend)|skip|absent|no\b)/i;
+    const isNonRsvpPick = opt.counts_as_rsvp === false || NON_RSVP_LABEL_RE.test(opt.label || '');
+    if (!isNonRsvpPick) {
+        try {
+            const startSec = Math.floor(new Date(ev.start_time).getTime() / 1000);
+            const dmText = action === 'added'
+                ? `✅ You've RSVPed to **${ev.title}** as **${opt.label}**.\n🕒 Starts <t:${startSec}:F> (<t:${startSec}:R>)`
+                : `❌ Your RSVP for **${ev.title}** (**${opt.label}**) has been removed.`;
+            await interaction.user.send(dmText);
+        } catch (e) {
+            // User has DMs disabled — silent
+        }
+    }
+
+    // Auto-add the RSVPing user to the event thread so they get briefing
+    // updates. Only on add — never on remove — AND only when the chosen
+    // option actually counts as an RSVP. Picking "Declined" / "Maybe with
+    // counts_as_rsvp:false" no longer drags the user into the thread.
+    if (action === 'added' && ev.thread_id && opt.counts_as_rsvp !== false) {
+        try {
+            const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+            const thread = guild ? await guild.channels.fetch(ev.thread_id).catch(() => null) : null;
+            if (thread && thread.isThread && thread.isThread() && typeof thread.members?.add === 'function') {
+                await thread.members.add(userId);
+            }
+        } catch (e) {
+            console.warn('Failed to add RSVPer to event thread:', e.message);
+        }
+    }
+}
+
+// ==============================================================================
+// === EVENT PING SCHEDULER (runs every 60s) ===
+// ==============================================================================
+setInterval(async () => {
+    try {
+        const data = loadCustomEvents();
+        const now = Date.now();
+        let dirty = false;
+        for (const ev of data.events) {
+            const startMs = new Date(ev.start_time).getTime();
+            const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+            if (!guild) continue;
+            const channel = guild.channels.cache.get(ev.channel_id);
+            if (!channel) continue;
+
+            const rsvpedUserIds = [...new Set(
+                (ev.rsvp_options || [])
+                    .filter(o => o.counts_as_rsvp !== false)
+                    .flatMap(o => o.users || [])
+            )];
+
+            // Reminders fire INSIDE the event thread, not the main channel.
+            // Use @here — Discord scopes that to "thread members currently
+            // online" in a thread context, so we don't ping everyone with
+            // the SPACEWHLE role and we don't paste a list of usernames.
+            // DMs go out in parallel as a backup for offline / muted thread
+            // members so nobody actually misses the reminder.
+            const thread = ev.thread_id
+                ? await guild.channels.fetch(ev.thread_id).catch(() => null)
+                : null;
+            const reminderTarget = (thread && thread.isThread && thread.isThread()) ? thread : null;
+
+            if (!ev.ping_30m_sent && startMs - now <= 30 * 60 * 1000 && startMs - now > 0) {
+                if (reminderTarget) {
+                    await reminderTarget.send({
+                        content: `@here ⏰ **${ev.title}** starts in 30 minutes! <t:${Math.floor(startMs/1000)}:R>`,
+                        allowedMentions: { parse: ['everyone'] }
+                    }).catch(e => console.warn('30m thread ping failed:', e.message));
+                }
+
+                // DM only members who explicitly opted in via the 🔔 Notify
+                // button on the event message. RSVPed users no longer get
+                // an automatic DM — reminders are opt-in by design.
+                const dmTargets = Array.isArray(ev.notify_users) ? ev.notify_users : [];
+                for (const uid of dmTargets) {
+                    try {
+                        const u = await client.users.fetch(uid);
+                        await u.send(`⏰ **${ev.title}** starts in 30 minutes! <t:${Math.floor(startMs/1000)}:R>`);
+                    } catch { /* DMs disabled */ }
+                }
+                ev.ping_30m_sent = true;
+                dirty = true;
+            }
+            if (!ev.ping_start_sent && startMs <= now) {
+                if (reminderTarget) {
+                    await reminderTarget.send({
+                        content: `@here 🚀 **${ev.title}** is starting NOW!`,
+                        allowedMentions: { parse: ['everyone'] }
+                    }).catch(e => console.warn('start thread ping failed:', e.message));
+                }
+
+                const dmTargets = Array.isArray(ev.notify_users) ? ev.notify_users : [];
+                for (const uid of dmTargets) {
+                    try {
+                        const u = await client.users.fetch(uid);
+                        await u.send(`🚀 **${ev.title}** is starting NOW!`);
+                    } catch { /* DMs disabled */ }
+                }
+                ev.ping_start_sent = true;
+                dirty = true;
+            }
+        }
+        if (dirty) saveCustomEvents(data);
+    } catch (e) {
+        console.error('Event scheduler tick error:', e);
+    }
+}, 60 * 1000);
+
+
+// ==============================================================================
+// === PUBLIC API: SOMA ROLES (id + name list, used for medal detection) ===
+// ==============================================================================
+app.get('/soma-roles', (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    try {
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'Bot not in guild' });
+        const somaRoles = [...guild.roles.cache.values()]
+            .filter(r => /soma/i.test(r.name))
+            .map(r => ({ id: r.id, name: r.name }));
+        res.json({ roles: somaRoles });
+    } catch (err) {
+        console.error('GET /soma-roles error:', err);
+        res.status(500).json({ error: 'Failed to load roles' });
+    }
+});
+
+// ==============================================================================
+// === PUBLIC API: UPCOMING CUSTOM EVENTS (with Discord deep links) ===
+// ==============================================================================
+// Used by the members-area Upcoming Operations card. Returns just enough to
+// render a card and a deep link back to the bot's event message in Discord.
+// Logistics orders proxy: members-area calls this so the dashboard can show
+// a user's order history without depending on Supabase RLS (which currently
+// blocks anon SELECT). Uses the service role key when configured, otherwise
+// falls back to anon. Only returns the orders for the requested discordId.
+app.get('/user/logistics-orders/:discordId', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    try {
+        const discordId = String(req.params.discordId || '').trim();
+        if (!/^\d{10,25}$/.test(discordId)) {
+            return res.status(400).json({ error: 'invalid discordId' });
+        }
+        const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+
+        // 1. Local mirror — always available, captured from the insert webhook.
+        const local = loadLocalLogisticsOrders().orders.filter(
+            o => String(o.user_discord_id) === discordId
+        );
+
+        // 2. If a service-role key is configured, also read straight from
+        //    Supabase (bypasses RLS, includes any pre-existing rows). Anon key
+        //    is intentionally NOT used here — RLS returns nothing for it.
+        let remote = [];
+        const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+        if (serviceKey) {
+            try {
+                const url = `${SUPABASE_URL}/rest/v1/logistics_orders` +
+                    `?user_discord_id=eq.${encodeURIComponent(discordId)}` +
+                    `&order=created_at.desc&limit=${limit}` +
+                    `&select=id,item,quantity,location,created_at`;
+                const r = await fetch(url, {
+                    headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` }
+                });
+                if (r.ok) remote = await r.json();
+            } catch (e) { /* fall back to the local mirror only */ }
+        }
+
+        // 3. Merge + dedupe (stable id when present, else item|location|time).
+        const seen = new Set();
+        const merged = [];
+        for (const o of [...remote, ...local]) {
+            const k = (o.id !== null && o.id !== undefined)
+                ? `id:${o.id}`
+                : `k:${o.item}|${o.location}|${o.created_at}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            merged.push(o);
+        }
+        merged.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+        res.json({ orders: merged.slice(0, limit) });
+    } catch (err) {
+        console.error('GET /user/logistics-orders error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Return the RSVPs (both upcoming and past) for a given user, pulled from
+// custom-events.json. Used by members-area's Operations Log and Upcoming
+// Operations cards so we don't have to keep a mirror in Supabase.
+app.get('/user/rsvps/:discordId', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    try {
+        const discordId = String(req.params.discordId || '').trim();
+        if (!discordId) return res.status(400).json({ error: 'discordId required' });
+        const data = loadCustomEvents();
+        const out = [];
+        for (const e of (data.events || [])) {
+            const matchingOpts = (e.rsvp_options || []).filter(o => (o.users || []).includes(discordId));
+            if (!matchingOpts.length) continue;
+            const opt = matchingOpts[0]; // single-choice — there's only ever one
+            out.push({
+                event_id:       e.id,
+                title:          e.title,
+                description:    e.description || '',
+                start_time:     e.start_time,
+                end_time:       e.end_time || null,
+                channel_id:     e.channel_id,
+                message_id:     e.message_id,
+                thread_id:      e.thread_id || null,
+                message_link:   (e.channel_id && e.message_id)
+                    ? `https://discord.com/channels/${SPACEWHLE_GUILD_ID}/${e.channel_id}/${e.message_id}`
+                    : null,
+                rsvp_label:     opt.label,
+                rsvp_emoji:     opt.emoji,
+                counts_as_rsvp: opt.counts_as_rsvp !== false
+            });
+        }
+        // Newest first.
+        out.sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+        res.json({ rsvps: out });
+    } catch (err) {
+        console.error('GET /user/rsvps error:', err);
+        res.status(500).json({ error: 'Failed to fetch user RSVPs' });
+    }
+});
+
+app.get('/events/upcoming', async (req, res) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Cache-Control', 'private, no-store');
+    try {
+        const data = loadCustomEvents();
+        const now = Date.now();
+
+        // Channel-visibility gate: members should only see events posted in
+        // Discord channels they can actually view. Mirrors the ViewChannel
+        // filter used by /admin/guild-info. The members-area passes the
+        // logged-in user's ?discordId; we resolve their guild member and keep
+        // only events whose channel they can see. When we can't resolve a
+        // viewer (no discordId, bot not in guild) we don't filter, so the card
+        // never breaks — the members-area always supplies a discordId.
+        const requesterId = String(req.query.discordId || '').trim();
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        let viewer = null;      // GuildMember, or @everyone Role
+        let filtering = false;
+        if (guild && requesterId && /^\d{10,25}$/.test(requesterId)) {
+            // Member in guild → filter by their perms. Not found (left the
+            // guild / transient) → fall back to what @everyone can see.
+            const member = await guild.members.fetch(requesterId).catch(() => null);
+            viewer = member || guild.roles.everyone;
+            filtering = true;
+        }
+        const canSee = (channelId) => {
+            if (!filtering) return true;   // no viewer resolved → don't filter
+            if (!channelId) return true;   // event not tied to a channel
+            const ch = guild.channels.cache.get(channelId);
+            if (!ch) return false;         // channel gone/uncached → can't confirm
+            const perms = ch.permissionsFor(viewer);
+            return !!(perms && perms.has(PermissionFlagsBits.ViewChannel));
+        };
+
+        const upcoming = (data.events || [])
+            .filter(e => new Date(e.start_time).getTime() > now)
+            .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+            .filter(e => canSee(e.channel_id))
+            .slice(0, 8)
+            .map(e => ({
+                id: e.id,
+                title: e.title,
+                description: e.description || '',
+                image_url: e.image_url || null,
+                start_time: e.start_time,
+                channel_id: e.channel_id,
+                message_id: e.message_id,
+                thread_id: e.thread_id || null,
+                message_link: (e.channel_id && e.message_id)
+                    ? `https://discord.com/channels/${SPACEWHLE_GUILD_ID}/${e.channel_id}/${e.message_id}`
+                    : null,
+                rsvp_summary: (e.rsvp_options || []).map(o => ({
+                    label: o.label,
+                    emoji: o.emoji,
+                    count: (o.users || []).length,
+                    max_slots: o.max_slots || null,
+                    counts_as_rsvp: o.counts_as_rsvp !== false
+                }))
+            }));
+        res.json({ events: upcoming });
+    } catch (err) {
+        console.error('GET /events/upcoming error:', err);
+        res.status(500).json({ error: 'Failed to fetch upcoming events' });
+    }
+});
+
+// ==============================================================================
+// === ADMIN: PROMOTE ANNOUNCEMENT (web-triggered) ===
+// ==============================================================================
+// Called by the admin website's Promote button. Looks up the target by
+// username, optionally swaps their rank role, and posts the standard
+// promotion announcement in PROMOTIONS_CHANNEL_ID.
+app.post('/admin/promote-announce', async (req, res) => {
+    const admin = await verifyAdmin(req);
+    if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+
+    try {
+        const { discord_name, rank_name, rank_role_id, previous_rank_role_id, custom_message, update_roles } = req.body || {};
+        if (!discord_name || (!rank_name && !rank_role_id)) {
+            return res.status(400).json({ error: 'discord_name and rank_name (or rank_role_id) required' });
+        }
+
+        const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+        if (!guild) return res.status(503).json({ error: 'Bot not in guild' });
+
+        // Resolve rank role
+        let rankRole = null;
+        if (rank_role_id) {
+            rankRole = guild.roles.cache.get(rank_role_id);
+        }
+        if (!rankRole && rank_name) {
+            // SPACEWHLE rank abbreviation → full Discord role name. Lets the
+            // admin button POST "Lt" or "Lieutenant" interchangeably.
+            const ABBR_TO_FULL = {
+                spw: 'SPACEWHLE',         op: 'Operator',
+                lcpl: 'Lance Corporal',   cpl: 'Corporal',
+                sgt: 'Sergeant',          ssgt: 'Staff Sergeant',
+                msg: 'Master Sergeant',   sm: 'Sergeant Major',
+                ocdt: 'Officer Cadet',    '2lt': 'Second Lieutenant',
+                lt: 'Lieutenant',         wgcdr: 'Wing Commander',
+                capt: 'Captain',          maj: 'Major',
+                ltcol: 'Lieutenant Colonel', col: 'Colonel',
+                brig: 'Brigadier',        ltgen: 'Lieutenant General',
+                gen: 'General',           fm: 'Field Marshal'
+            };
+            const norm = String(rank_name).toLowerCase().replace(/[^a-z0-9]/g, '');
+            const candidates = [norm];
+            if (ABBR_TO_FULL[norm]) candidates.push(
+                ABBR_TO_FULL[norm].toLowerCase().replace(/[^a-z0-9]/g, '')
+            );
+            rankRole = guild.roles.cache.find(r => {
+                const rn = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+                return candidates.some(c => rn === c);
+            });
+            // Last resort: case-insensitive substring match — pick the
+            // shortest matching role name to avoid ambiguity.
+            if (!rankRole) {
+                const subMatches = guild.roles.cache.filter(r =>
+                    r.name.toLowerCase().replace(/[^a-z0-9]/g, '').includes(norm)
+                );
+                rankRole = [...subMatches.values()].sort((a, b) => a.name.length - b.name.length)[0];
+            }
+        }
+        if (!rankRole) return res.status(404).json({ error: `Rank role not found for "${rank_name}"` });
+
+        // Resolve target member by username (try cache, then full member list)
+        const wantedName = String(discord_name).toLowerCase();
+        let targetMember = guild.members.cache.find(m =>
+            (m.user.username || '').toLowerCase() === wantedName ||
+            (m.user.globalName || '').toLowerCase() === wantedName ||
+            (m.displayName || '').toLowerCase() === wantedName
+        );
+        if (!targetMember) {
+            await guild.members.fetch().catch(() => {});
+            targetMember = guild.members.cache.find(m =>
+                (m.user.username || '').toLowerCase() === wantedName ||
+                (m.user.globalName || '').toLowerCase() === wantedName ||
+                (m.displayName || '').toLowerCase() === wantedName
+            );
+        }
+        if (!targetMember) return res.status(404).json({ error: 'Target member not found in Discord guild' });
+
+        // Update roles (default: yes). Add the new rank role, then strip every
+        // OTHER SPACEWHLE rank-ladder role the member still holds so a promotion
+        // (e.g. LCpl -> Cpl) cleanly REMOVES the previous rank instead of leaving
+        // both stacked. The base SPACEWHLE membership role (SpW) is deliberately
+        // NOT in this set, so a promotion never strips someone's org membership.
+        const RANK_LADDER_ROLE_IDS = new Set([
+            '1308509681613934633', // Op    - Operator
+            '1366867228376694824', // LCpl  - Lance Corporal
+            '1366867077155262524', // Cpl   - Corporal
+            '1366866972159246346', // Sgt   - Sergeant
+            '1366866853724553357', // SSgt  - Staff Sergeant
+            '1388620399398621194', // MSG   - Master Sergeant
+            '1386802432134090783', // SM    - Sergeant Major
+            '1429466916157919394', // OCdt  - Officer Cadet
+            '1366866733205295214', // 2Lt   - Second Lieutenant
+            '1366866565898698915', // Lt    - Lieutenant
+            '1388620682145042593', // WgCdr - Wing Commander
+            '1308509585874747495', // Capt  - Captain
+            '1308509266055008378', // Maj   - Major
+            '1366876915083776060', // LtCol - Lieutenant Colonel
+            '1308509088807780382', // Col   - Colonel
+            '1308508914668535839', // Brig  - Brigadier
+            '1354881826178469898', // LtGen - Lieutenant General
+            '1308706708683493397', // Gen   - General
+            '1308508590809813013', // FM    - Field Marshal
+        ]);
+        if (update_roles !== false) {
+            try {
+                await targetMember.roles.add(rankRole, `Promotion announce by ${admin.userId}`);
+
+                // Strip any OTHER ladder rank the member currently has — this is
+                // the "remove the previous rank" behaviour. Also honour an explicit
+                // previous_rank_role_id if one was passed (backward compatibility).
+                const toRemove = new Set();
+                for (const id of RANK_LADDER_ROLE_IDS) {
+                    if (id !== rankRole.id && targetMember.roles.cache.has(id)) toRemove.add(id);
+                }
+                if (previous_rank_role_id && previous_rank_role_id !== rankRole.id &&
+                    targetMember.roles.cache.has(previous_rank_role_id)) {
+                    toRemove.add(previous_rank_role_id);
+                }
+                for (const id of toRemove) {
+                    const prevRole = guild.roles.cache.get(id);
+                    if (prevRole) {
+                        await targetMember.roles.remove(prevRole, `Promotion announce by ${admin.userId}`).catch(() => {});
+                    }
+                }
+            } catch (e) {
+                console.warn('Promotion role update failed:', e.message);
+            }
+        }
+
+        // Resolve announcement channel
+        const channelId = PROMOTIONS_CHANNEL_ID || '1308529431907663872';
+        const channel = await guild.channels.fetch(channelId).catch(() => null);
+        if (!channel || !channel.isTextBased()) {
+            return res.status(404).json({ error: 'Promotions channel not found / not text' });
+        }
+
+        const announcement = buildPromotionAnnouncement(targetMember, rankRole, [rankRole], custom_message);
+        await channel.send({
+            content: announcement,
+            allowedMentions: {
+                users: [targetMember.id],
+                roles: [rankRole.id],
+                repliedUser: false
+            }
+        });
+
+        // Mirror the new rank onto the roster table so the website's
+        // Roster Management view reflects the promotion immediately.
+        // Best-effort — log a warning if it fails so the announcement
+        // path doesn't break. Fetches the current roster row first so we
+        // can preserve RSI / divisions (Django update-member overwrites
+        // any field it gets, doesn't skip blanks).
+        try {
+            const NAME_TO_ABBR = {
+                'spacewhle': 'SpW', 'operator': 'Op',
+                'lance corporal': 'LCpl', 'corporal': 'Cpl',
+                'sergeant': 'Sgt', 'staff sergeant': 'SSgt',
+                'master sergeant': 'MSG', 'sergeant major': 'SM',
+                'officer cadet': 'OCdt', 'second lieutenant': '2Lt',
+                'lieutenant': 'Lt', 'wing commander': 'WgCdr',
+                'captain': 'Capt', 'major': 'Maj',
+                'lieutenant colonel': 'LtCol', 'colonel': 'Col',
+                'brigadier': 'Brig', 'lieutenant general': 'LtGen',
+                'general': 'Gen', 'field marshal': 'FM'
+            };
+            const rosterAbbr = NAME_TO_ABBR[(rankRole.name || '').toLowerCase()]
+                || (rank_name && NAME_TO_ABBR[String(rank_name).toLowerCase()])
+                || rank_name
+                || rankRole.name;
+            // Pull current roster to find the existing row.
+            const rosterRes = await fetch('https://api.spacewhle.org/api/admin/roster', {
+                headers: { Authorization: req.headers.authorization }
+            });
+            const rosterJson = rosterRes.ok ? await rosterRes.json() : { members: [] };
+            const wanted = String(discord_name).toLowerCase();
+            const existing = (rosterJson.members || []).find(m =>
+                (m.discord || '').toLowerCase() === wanted
+            ) || {};
+            await fetch('https://api.spacewhle.org/api/admin/update-member', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: req.headers.authorization
+                },
+                body: JSON.stringify({
+                    discord_name: existing.discord || discord_name,
+                    rank: rosterAbbr,
+                    rsi_handle:           existing.rsi_handle || '',
+                    division_operations:  existing.div_ops    || '',
+                    division_logistics:   existing.div_log    || '',
+                    division_medical:     existing.div_med    || '',
+                    division_academic:    existing.div_aca    || '',
+                    points_attendance: 0, points_soma: 0, points_orders: 0
+                })
+            }).catch(e => console.warn('Roster rank mirror failed:', e.message));
+        } catch (e) {
+            console.warn('Roster rank mirror exception:', e.message);
+        }
+
+        res.json({ ok: true, message: 'Promotion announcement posted.' });
+    } catch (err) {
+        console.error('POST /admin/promote-announce error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ==============================================================================
+// === EVENT NOTIFY-ME OPT-IN (DM 30 min before start + at start) ===
+// ==============================================================================
+// Adds a "🔔 Notify" button to event messages. Clicking toggles a member into
+// `ev.notify_users`; the scheduler DMs everyone in that list at T-30 and T-0.
+
+function buildEventNotifyRow(ev) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`evnotify:${ev.id}`)
+            .setLabel('Notify me 30m before')
+            .setEmoji('🔔')
+            .setStyle(ButtonStyle.Primary)
+    );
+}
+
+async function handleEventNotifyButton(interaction, eventId) {
+    const data = loadCustomEvents();
+    const ev = data.events.find(e => e.id === eventId);
+    if (!ev) {
+        return interaction.reply({ content: '❌ This event no longer exists.', ephemeral: true }).catch(() => {});
+    }
+    if (!Array.isArray(ev.notify_users)) ev.notify_users = [];
+    const userId = interaction.user.id;
+    let action;
+    if (ev.notify_users.includes(userId)) {
+        ev.notify_users = ev.notify_users.filter(u => u !== userId);
+        action = 'off';
+    } else {
+        ev.notify_users.push(userId);
+        action = 'on';
+    }
+    saveCustomEvents(data);
+
+    try { await interaction.deferUpdate(); } catch {}
+
+    const ack = action === 'on'
+        ? `🔔 You'll get a DM 30 minutes before **${ev.title}** starts (and again at start).`
+        : `🔕 Notifications turned off for **${ev.title}**.`;
+    try { await interaction.followUp({ content: ack, ephemeral: true }); } catch {}
+}
 
 // ==============================================================================
 // === BOT LOGIN AND SERVER START ===

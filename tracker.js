@@ -183,7 +183,7 @@ function assertStatsImageRenderer() {
 }
 
 const STATE_FILE = path.join(__dirname, 'stats-state.json');
-const MAX_DAYS = 35;
+const MAX_DAYS = 3650; // keep ~10 years of daily history (was 35)
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const STAR_CITIZEN_MATCH = /star\s*citizen/i;
 const THUMBNAIL_URL = 'https://robertsspaceindustries.com/media/zlgck6fw560rdr/logo/SPACEWHLE-Logo.png';
@@ -1653,16 +1653,28 @@ class StatsTracker {
   }
 
   getLeaderboard(days = 7) {
-    const dayKeys = this.getRangeDayKeys(days);
     const trackedUsers = this.getTrackedUsers();
+
+    // "All-time" (very large , e.g. 9999) used to build a 9999-element
+    // date array and sum every key per user per metric — millions of lookups,
+    // ~3s. When the window is effectively unbounded, sum each user's actual
+    // recorded entries directly (O(recorded days), ~tens of entries).
+    const ALL_TIME = days >= 3650;
+    const dayKeys = ALL_TIME ? [] : this.getRangeDayKeys(days);
+    const sumAll = (map) => {
+      let s = 0;
+      for (const k in (map || {})) s += Number(map[k] || 0);
+      return s;
+    };
+    const sumFor = ALL_TIME ? sumAll : (map) => this.sumMap(map, dayKeys);
 
     const rows = trackedUsers
       .map(user => ({
         userId: user.userId,
         username: user.username,
-        messages: this.sumMap(user.messages, dayKeys),
-        voiceSeconds: this.sumMap(user.voiceSeconds, dayKeys),
-        starCitizenSeconds: this.sumMap(user.starCitizenSeconds, dayKeys),
+        messages: sumFor(user.messages),
+        voiceSeconds: sumFor(user.voiceSeconds),
+        starCitizenSeconds: sumFor(user.starCitizenSeconds),
       }))
       .filter(row => row.messages > 0 || row.voiceSeconds > 0 || row.starCitizenSeconds > 0);
 
@@ -1673,6 +1685,23 @@ class StatsTracker {
       starCitizen: [...rows].sort((a, b) => b.starCitizenSeconds - a.starCitizenSeconds),
       dayKeys,
       trackedUsers,
+    };
+  }
+
+  // Totals-only: avoids building the per-day series (a 9999-element array
+  // for all-time) when the caller just needs the summed totals. O(recorded
+  // days) for all-time instead of O(days).
+  getUserTotals(userId, days = 7) {
+    const user = this.state.users[userId];
+    if (!user) return null;
+    const ALL_TIME = days >= 3650;
+    const sumAll = (map) => { let s = 0; for (const k in (map || {})) s += Number(map[k] || 0); return s; };
+    const dayKeys = ALL_TIME ? null : this.getRangeDayKeys(days);
+    const sumFor = ALL_TIME ? sumAll : (map) => this.sumMap(map, dayKeys);
+    return {
+      messages: sumFor(user.messages),
+      voiceSeconds: sumFor(user.voiceSeconds),
+      starCitizenSeconds: sumFor(user.starCitizenSeconds),
     };
   }
 

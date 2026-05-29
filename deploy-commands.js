@@ -45,12 +45,18 @@ const commands = [
         .setRequired(false)
         .setMaxLength(1200)
     )
-    .addChannelOption(option =>
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('promote-spacewhle')
+    .setDescription('Welcome a verified member into SPACEWHLE (silent rank add + welcome ping)')
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+    .addUserOption(option =>
       option
-        .setName('channel')
-        .setDescription('Announcement channel, defaults to the configured promotions channel')
-        .setRequired(false)
-        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+        .setName('member')
+        .setDescription('Member to welcome into SPACEWHLE')
+        .setRequired(true)
     )
     .toJSON(),
 
@@ -214,6 +220,18 @@ const commands = [
         .setDescription('Ship name')
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('event')
+    .setDescription('Event attendance tools')
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageEvents)
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('status')
+        .setDescription('Show live attendance tracking — who the bot sees and whether it is recording')
     )
     .toJSON(),
 ];
