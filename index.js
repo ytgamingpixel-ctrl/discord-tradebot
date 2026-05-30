@@ -69,6 +69,31 @@ const API_AUTH_HEADER = String(process.env.API_AUTH_HEADER || 'Authorization').t
 const API_AUTH_SCHEME = String(process.env.API_AUTH_SCHEME || 'Bearer').trim();
 const API_MEMBER_PROFILE_PATH = process.env.API_MEMBER_PROFILE_PATH || '/api/discord/{discordId}/profile';
 const API_RSI_LINK_PATH = process.env.API_RSI_LINK_PATH || '/api/discord/{discordId}/rsi';
+// Ordered SPACEWHLE rank ladder, low -> high. Mirrors RANK_LADDER_ROLE_IDS used
+// by the promotion-announce endpoint. Rank in this org IS a Discord role
+// (promotions add/remove exactly these), so /me resolves a member's current
+// rank straight from their roles rather than the roster DB.
+const RANK_LADDER = [
+  { id: '1308509681613934633', name: 'Operator' },
+  { id: '1366867228376694824', name: 'Lance Corporal' },
+  { id: '1366867077155262524', name: 'Corporal' },
+  { id: '1366866972159246346', name: 'Sergeant' },
+  { id: '1366866853724553357', name: 'Staff Sergeant' },
+  { id: '1388620399398621194', name: 'Master Sergeant' },
+  { id: '1386802432134090783', name: 'Sergeant Major' },
+  { id: '1429466916157919394', name: 'Officer Cadet' },
+  { id: '1366866733205295214', name: 'Second Lieutenant' },
+  { id: '1366866565898698915', name: 'Lieutenant' },
+  { id: '1388620682145042593', name: 'Wing Commander' },
+  { id: '1308509585874747495', name: 'Captain' },
+  { id: '1308509266055008378', name: 'Major' },
+  { id: '1366876915083776060', name: 'Lieutenant Colonel' },
+  { id: '1308509088807780382', name: 'Colonel' },
+  { id: '1308508914668535839', name: 'Brigadier' },
+  { id: '1354881826178469898', name: 'Lieutenant General' },
+  { id: '1308706708683493397', name: 'General' },
+  { id: '1308508590809813013', name: 'Field Marshal' },
+];
 // Hard-default to the SPACEWHLE promotions channel. The env var still
 // wins if set, so we can flip targets without redeploying.
 const PROMOTIONS_CHANNEL_ID = process.env.PROMOTIONS_CHANNEL_ID || '1308529431907663872';
@@ -868,39 +893,90 @@ function buildMemberProfileEmbed(profile, discordUser) {
   return embed;
 }
 
+// Highest rank-ladder role the member currently holds (RANK_LADDER is ordered
+// low -> high, so the last match wins). Returns null if they hold none.
+function resolveMemberRank(member) {
+  if (!member || !member.roles || !member.roles.cache) return null;
+  let rank = null;
+  for (const tier of RANK_LADDER) {
+    if (member.roles.cache.has(tier.id)) rank = tier.name;
+  }
+  return rank;
+}
+
+// /me — the calling member's own SPACEWHLE profile, built entirely from data
+// the bot already has: rank from their Discord roles, plus all-time activity +
+// live leaderboard position from the same scoring the public /leaderboard uses.
 async function handleMeCommand(interaction) {
   await deferChatInputCommand(interaction);
 
   try {
-    const payload = await fetchWebsiteJson(API_MEMBER_PROFILE_PATH, {
-      discordId: interaction.user.id,
-      userId: interaction.user.id,
-    });
-    const profile = normalizeMemberProfile(payload, interaction.user);
+    const userId = interaction.user.id;
+    const displayName =
+      (interaction.member && interaction.member.displayName) ||
+      interaction.user.globalName ||
+      interaction.user.username ||
+      'Member';
 
-    if (!profile) {
-      await interaction.editReply('I found a profile response, but it did not include usable member data yet.');
-      return;
+    // Rank straight from Discord roles (source of truth). Refetch the member if
+    // the interaction didn't carry a role cache (e.g. stale gateway state).
+    let member = interaction.member;
+    if ((!member || !member.roles || !member.roles.cache) && interaction.guild) {
+      member = await interaction.guild.members.fetch(userId).catch(() => null);
+    }
+    const rank = resolveMemberRank(member);
+
+    // All-time board (days >= 3650 => all-time in the tracker), scored with the
+    // SAME formula the public leaderboard uses. Full board (not sliced) so the
+    // caller is always findable even outside the top 50.
+    const board = await getScoredLeaderboard(9999);
+    const idx = board.findIndex(r => String(r.discord_id) === String(userId));
+    const me = idx >= 0 ? board[idx] : null;
+
+    let messages = 0, voiceHours = 0, scHours = 0, eventsAttended = 0, score = 0;
+    if (me) {
+      messages = me.messages || 0;
+      voiceHours = me.voice_hours || 0;
+      scHours = me.sc_hours || 0;
+      eventsAttended = me.events_attended || 0;
+      score = me.score || 0;
+    } else {
+      // Not on the board yet (no recorded activity) — fall back to raw totals.
+      try {
+        const t = tracker.getUserTotals(userId, 9999) || {};
+        messages = t.messages || 0;
+        voiceHours = Math.round((t.voiceSeconds || 0) / 3600 * 10) / 10;
+        scHours = Math.round((t.starCitizenSeconds || 0) / 3600 * 10) / 10;
+        score = ((t.messages || 0) * 250) + ((t.voiceSeconds || 0) * 8) + ((t.starCitizenSeconds || 0) * 0.3);
+      } catch (e) {
+        console.error('/me tracker totals error:', e);
+      }
     }
 
-    await interaction.editReply({ embeds: [buildMemberProfileEmbed(profile, interaction.user)] });
+    const nf = n => Number(n || 0).toLocaleString('en-GB');
+    const position = idx >= 0
+      ? `#${nf(idx + 1)} of ${nf(board.length)}`
+      : 'Unranked';
+
+    const embed = new EmbedBuilder()
+      .setColor(0x22d3ee)
+      .setTitle(`${displayName}'s Profile`)
+      .setThumbnail(interaction.user.displayAvatarURL({ size: 128 }))
+      .addFields(
+        { name: 'Rank', value: rank || 'Unranked', inline: true },
+        { name: 'Events Attended', value: nf(eventsAttended), inline: true },
+        { name: 'Activity Score', value: nf(Math.round(score)), inline: true },
+        { name: 'Messages', value: nf(messages), inline: true },
+        { name: 'Voice Time', value: `${nf(voiceHours)} h`, inline: true },
+        { name: 'Star Citizen Time', value: `${nf(scHours)} h`, inline: true },
+        { name: 'Activity Leaderboard', value: position, inline: false },
+      )
+      .setFooter({ text: 'All-time stats - SPACEWHLE' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
   } catch (error) {
-    if (error.code === 'API_NOT_CONFIGURED') {
-      await interaction.editReply('The member profile API is not configured yet. Set `API_BASE_URL` and, if needed, `API_MEMBER_PROFILE_PATH`.');
-      return;
-    }
-
-    if (Number(error.status) === 404) {
-      await interaction.editReply('I could not find a linked organisation profile for you yet. Link your account on the website, then try again.');
-      return;
-    }
-
-    if (Number(error.status) === 401 || Number(error.status) === 403) {
-      await interaction.editReply('The profile API rejected the bot request. Check the API auth environment settings.');
-      return;
-    }
-
-    console.error('Member profile lookup failed:', error);
+    console.error('/me command failed:', error);
     await interaction.editReply('I could not load your profile right now. Try again in a minute.');
   }
 }
@@ -3707,6 +3783,65 @@ app.get('/events', async (req, res) => {
 // ==============================================================================
 // === PUBLIC API: ACTIVITY LEADERBOARD ===
 // ==============================================================================
+
+// Shared activity-leaderboard builder: returns ALL tracked members, enriched
+// with roster event counts and scored high -> low (NOT sliced). The scoring here
+// intentionally mirrors the GET /leaderboard endpoint below (events x10000,
+// messages x250, voice secs x8, SC secs x0.3) so /me reports the exact same
+// ranking members see on the site. Keep the two formulas identical if either
+// ever changes.
+async function getScoredLeaderboard(days) {
+    const board = tracker.getLeaderboard(days);
+    const allTrackerRows = board.all || [];
+
+    const guild = client.guilds.cache.get(SPACEWHLE_GUILD_ID);
+    if (guild && guild.members.cache.size < (guild.memberCount || 0) * 0.5) {
+        try { await guild.members.fetch(); } catch (e) { console.warn('LB member fetch failed:', e.message); }
+    }
+
+    const identityFor = (userId, fallbackName) => {
+        const m = guild && userId ? guild.members.cache.get(userId) : null;
+        if (!m) return { displayName: fallbackName, username: (fallbackName || '').toLowerCase() };
+        return {
+            displayName: m.displayName || m.user?.globalName || m.user?.username || fallbackName,
+            username:    (m.user?.username || fallbackName || '').toLowerCase()
+        };
+    };
+
+    const eventsByHandle = new Map();
+    try {
+        const rosterRes = await fetch('https://api.spacewhle.org/api/roster-list');
+        if (rosterRes.ok) {
+            const rosterJson = await rosterRes.json();
+            for (const m of (rosterJson.members || [])) {
+                const key = String(m.discord_name || '').toLowerCase();
+                if (key) eventsByHandle.set(key, (m.events || 0) + (m.soma || 0) + (m.orders || 0));
+            }
+        }
+    } catch (e) { console.warn('LB roster-list fetch failed:', e.message); }
+
+    return allTrackerRows.map(u => {
+        const identity = identityFor(u.userId, u.username);
+        const eventsAttended =
+            eventsByHandle.get(identity.username)
+            ?? eventsByHandle.get(String(u.username || '').toLowerCase())
+            ?? 0;
+        return {
+            discord_id:      u.userId,
+            display_name:    identity.displayName || u.username,
+            messages:        u.messages || 0,
+            voice_hours:     Math.round((u.voiceSeconds || 0) / 3600 * 10) / 10,
+            sc_hours:        Math.round((u.starCitizenSeconds || 0) / 3600 * 10) / 10,
+            events_attended: eventsAttended,
+            // Scoring: events x10000, messages x250, voice secs x8, SC secs x0.3
+            score: (eventsAttended * 10000)
+                 + ((u.messages || 0) * 250)
+                 + ((u.voiceSeconds || 0) * 8)
+                 + ((u.starCitizenSeconds || 0) * 0.3)
+        };
+    })
+    .sort((a, b) => b.score - a.score);
+}
 
 app.get('/leaderboard', async (req, res) => {
     try {
